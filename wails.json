@@ -1,0 +1,19 @@
+{
+  "name": "password-saver",
+  "outputfilename": "password-saver",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "seo79",
+    "email": ""
+  },
+  "info": {
+    "companyName": "",
+    "productName": "PasswordSaver",
+    "productVersion": "1.0.0",
+    "copyright": "© 2026 Artem Dreiman",
+    "comments": "Менеджер паролей"
+  }
+}
