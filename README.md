@@ -88,7 +88,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone [https://github.com/artemdreim-cell/password-saver](https://github.com/artemdreim-cell/password-saver)
+   git clone [https://github.com/seo79-sec/password-saver](https://github.com/seo79-sec/password-saver)
    cd password-saver
 2. Установите зависимости фронтенда:
    cd frontend
