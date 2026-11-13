@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"password-saver/crypto"
+	cryptov2 "password-saver/crypto/v2"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ type App struct {
 	mu               sync.RWMutex
 	ctx              context.Context
 	cm               *crypto.CryptoManager
+	v2Session        *v2VaultSession
 	vault            *Vault
 	twoFAVerified    bool // НОВОЕ: Флаг успешного прохождения 2FA
 	pendingReset     resetChallenge
@@ -72,12 +75,33 @@ func (a *App) Login(password string) (bool, error) {
 	// previous session had completed the second factor.
 	a.logoutLocked()
 	a.clearPendingChallengesLocked()
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	if selectionErr != nil {
+		vaultActivationMu.Unlock()
+		return false, selectionErr
+	}
+	if selection.ActiveV2 {
+		vaultActivationMu.Unlock()
+		return false, ErrVaultV2UIUnavailable
+	}
 	cm, err := crypto.NewCryptoManager(password)
 	if err != nil {
+		vaultActivationMu.Unlock()
 		return false, err
 	}
 
 	v, err := LoadVault(cm)
+	if err == nil && selection.NeedsV1Record {
+		state := vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1}
+		if stateErr := writeVaultSelector(vaultPaths(".").selector, state); stateErr != nil {
+			wipeVault(v)
+			cm.Wipe()
+			vaultActivationMu.Unlock()
+			return false, stateErr
+		}
+	}
+	vaultActivationMu.Unlock()
 	if err != nil {
 		cm.Wipe()
 		return false, errors.New("неверный мастер-пароль или файл поврежден")
@@ -112,6 +136,11 @@ func (a *App) logoutLocked() {
 		a.cm.Wipe() // Принудительно забиваем нулями область RAM с паролем
 		a.cm = nil  // Обнуляем указатель сессии
 	}
+	if a.v2Session != nil {
+		a.v2Session.close()
+		a.v2Session = nil
+	}
+	wipeVault(a.vault)
 	a.vault = nil
 	a.twoFAVerified = false // Сбрасываем статус 2FA
 	a.clearPendingChallengesLocked()
@@ -125,7 +154,7 @@ func (a *App) armIdleTimerLocked() {
 	if a.idleTimer != nil {
 		a.idleTimer.Stop()
 	}
-	if a.cm == nil || a.idleTimeout <= 0 {
+	if (a.cm == nil && a.v2Session == nil) || a.idleTimeout <= 0 {
 		return
 	}
 	remaining := time.Until(a.lastActivity.Add(a.idleTimeout))
@@ -135,7 +164,7 @@ func (a *App) armIdleTimerLocked() {
 	a.idleTimer = time.AfterFunc(remaining, func() {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if a.cm == nil {
+		if a.cm == nil && a.v2Session == nil {
 			return
 		}
 		if time.Since(a.lastActivity) >= a.idleTimeout {
@@ -154,7 +183,7 @@ func (a *App) SetIdleTimeout(minutes int) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.idleTimeout = time.Duration(minutes) * time.Minute
-	if a.cm != nil {
+	if a.cm != nil || a.v2Session != nil {
 		a.lastActivity = time.Now()
 		a.armIdleTimerLocked()
 	}
@@ -165,7 +194,7 @@ func (a *App) SetIdleTimeout(minutes int) error {
 func (a *App) TouchActivity() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cm != nil {
+	if a.cm != nil || a.v2Session != nil {
 		a.lastActivity = time.Now()
 		a.armIdleTimerLocked()
 	}
@@ -176,7 +205,7 @@ func (a *App) TouchActivity() {
 func (a *App) CheckInactivity() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cm != nil && time.Since(a.lastActivity) >= a.idleTimeout {
+	if (a.cm != nil || a.v2Session != nil) && time.Since(a.lastActivity) >= a.idleTimeout {
 		a.logoutLocked()
 	}
 	return a.isLockedLocked()
@@ -190,7 +219,55 @@ func (a *App) IsLocked() bool {
 }
 
 func (a *App) isLockedLocked() bool {
-	return a.cm == nil || !a.twoFAVerified
+	return (a.cm == nil && a.v2Session == nil) || !a.twoFAVerified
+}
+
+// unlockActiveV2ForBackend is intentionally unexported and is not a Wails
+// binding. It supports backend tests and future UI integration without
+// exposing the DEK or retaining the master password.
+func (a *App) unlockActiveV2ForBackend(password, totpCode string, engine *cryptov2.Engine) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if time.Now().Before(a.totpBlockedUntil) {
+		return errors.New("слишком много неверных кодов 2FA; попробуйте позже")
+	}
+	a.logoutLocked()
+	path := filepath.Join(".", dataFileV2)
+	session, vault, err := openActiveV2VaultSession(path, engine, password)
+	if err != nil {
+		return err
+	}
+	if vault.TwoFAEnabled && !totp.Validate(totpCode, vault.TwoFASecret) {
+		session.close()
+		wipeVault(vault)
+		a.recordTOTPFailureLocked()
+		return errors.New("неверный код 2FA")
+	}
+	a.cm = nil
+	a.v2Session = session
+	a.vault = vault
+	a.twoFAVerified = true
+	a.totpFailures = 0
+	a.totpBlockedUntil = time.Time{}
+	a.lastActivity = time.Now()
+	a.armIdleTimerLocked()
+	return nil
+}
+
+// confirmV2Activation is an internal backend transition; it is deliberately
+// not exported as a Wails method. Any previous v1 or v2 session is closed once
+// durable selector state confirms v2, including an uncertain post-sync result.
+func (a *App) confirmV2Activation(service *v2ActivationService, token, password, totpCode string, engine *cryptov2.Engine) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	err := service.Confirm(token, password, totpCode, engine)
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	vaultActivationMu.Unlock()
+	if err == nil || (selectionErr == nil && selection.ActiveV2) {
+		a.logoutLocked()
+	}
+	return err
 }
 
 // 2. УПРАВЛЕНИЕ ЗАПИСЯМИ ХРАНИЛИЩА
@@ -208,6 +285,20 @@ func (a *App) GetAccounts() ([]Account, error) {
 func (a *App) updateVault(change func(*Vault)) error {
 	before := cloneVault(a.vault)
 	change(a.vault)
+	if a.v2Session != nil {
+		if err := a.v2Session.save(a.vault); err != nil {
+			if errors.Is(err, errVaultCommitUncertain) || errors.Is(err, ErrVaultSessionChanged) || errors.Is(err, ErrVaultSelectionAmbiguous) || errors.Is(err, ErrVaultV2NotActive) {
+				wipeVault(before)
+				a.logoutLocked()
+				return err
+			}
+			wipeVault(a.vault)
+			a.vault = before
+			return err
+		}
+		wipeVault(before)
+		return nil
+	}
 	if err := SaveVault(a.cm, a.vault); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
 			return err
@@ -305,6 +396,18 @@ func (a *App) BeginVaultReset() (string, error) {
 	if !a.isLockedLocked() {
 		return "", errors.New("сначала заблокируйте хранилище")
 	}
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	vaultActivationMu.Unlock()
+	if selectionErr != nil {
+		return "", selectionErr
+	}
+	if selection.ActiveV2 {
+		return "", ErrVaultV2Protected
+	}
+	if selection.Prepared {
+		return "", ErrVaultV2PreparationPending
+	}
 	token, err := newChallengeToken()
 	if err != nil {
 		return "", err
@@ -334,8 +437,22 @@ func (a *App) ResetVault(token string) error {
 		return errors.New("подтверждение сброса отсутствует или истекло")
 	}
 	a.pendingReset = resetChallenge{}
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	if selectionErr != nil {
+		vaultActivationMu.Unlock()
+		return selectionErr
+	}
+	if selection.ActiveV2 || selection.Prepared {
+		vaultActivationMu.Unlock()
+		if selection.ActiveV2 {
+			return ErrVaultV2Protected
+		}
+		return ErrVaultV2PreparationPending
+	}
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
+	defer vaultActivationMu.Unlock()
 	a.logoutLocked()
 	for _, path := range []string{dataFile, dataFile + ".bak"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -362,15 +479,32 @@ func (a *App) PrepareVaultRecovery(password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	if selectionErr != nil {
+		vaultActivationMu.Unlock()
+		cm.Wipe()
+		return "", selectionErr
+	}
+	if selection.ActiveV2 || selection.Prepared {
+		vaultActivationMu.Unlock()
+		cm.Wipe()
+		if selection.ActiveV2 {
+			return "", ErrVaultV2Protected
+		}
+		return "", ErrVaultV2PreparationPending
+	}
 	vaultFileMu.Lock()
 	_, primaryErr := loadVaultFromPath(cm, dataFile)
 	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
 		vaultFileMu.Unlock()
+		vaultActivationMu.Unlock()
 		cm.Wipe()
 		return "", errors.New("основной файл нельзя безопасно восстановить")
 	}
 	_, backupErr := loadVaultFromPath(cm, dataFile+".bak")
 	vaultFileMu.Unlock()
+	vaultActivationMu.Unlock()
 	if backupErr != nil {
 		cm.Wipe()
 		return "", errors.New("резервная копия не прошла проверку целостности или пароля")
@@ -417,8 +551,21 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 			a.clearPendingRecoveryLocked()
 		}
 	}()
+	vaultActivationMu.Lock()
+	selection, selectionErr := resolveVaultSelectionLocked(".")
+	if selectionErr != nil || selection.ActiveV2 || selection.Prepared {
+		vaultActivationMu.Unlock()
+		if selectionErr != nil {
+			return false, selectionErr
+		}
+		if selection.ActiveV2 {
+			return false, ErrVaultV2Protected
+		}
+		return false, ErrVaultV2PreparationPending
+	}
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
+	defer vaultActivationMu.Unlock()
 	_, primaryErr := loadVaultFromPath(pending.cm, dataFile)
 	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
 		a.clearPendingRecoveryLocked()
