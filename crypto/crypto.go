@@ -9,11 +9,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
 
 type CryptoManager struct {
+	mu             sync.RWMutex
 	masterPassword []byte // Изменено со string на []byte для возможности затирания в RAM
 }
 
@@ -22,6 +24,11 @@ type EncryptedData struct {
 	Salt       string `json:"salt"`
 	Nonce      string `json:"nonce"`
 }
+
+const (
+	SaltSize        = 32
+	CiphertextLimit = 64 << 20
+)
 
 func NewCryptoManager(masterPassword string) (*CryptoManager, error) {
 	if len(masterPassword) < 12 {
@@ -46,6 +53,11 @@ func ZeroMemory(data []byte) {
 // Wipe гарантированно уничтожает мастер-пароль внутри крипто-менеджера.
 // Этот метод нужно обязательно вызывать при Logout или блокировке приложения.
 func (cm *CryptoManager) Wipe() {
+	if cm == nil {
+		return
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	if cm.masterPassword != nil {
 		ZeroMemory(cm.masterPassword) // Затираем нулями ячейки памяти
 		cm.masterPassword = nil       // Разрываем ссылку
@@ -53,11 +65,16 @@ func (cm *CryptoManager) Wipe() {
 }
 
 func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
-	if cm.masterPassword == nil {
+	if cm == nil {
+		return nil, errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if len(cm.masterPassword) == 0 {
 		return nil, errors.New("крипто-менеджер уничтожен или сессия закрыта")
 	}
 
-	salt := make([]byte, 32)
+	salt := make([]byte, SaltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
@@ -94,8 +111,19 @@ func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
 }
 
 func (cm *CryptoManager) Decrypt(ed *EncryptedData) (string, error) {
-	if cm.masterPassword == nil {
+	if cm == nil {
 		return "", errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if len(cm.masterPassword) == 0 {
+		return "", errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	if ed == nil {
+		return "", errors.New("поврежденный зашифрованный контейнер")
+	}
+	if len(ed.Salt) > 128 || len(ed.Nonce) > 64 || len(ed.Ciphertext) > (CiphertextLimit*4/3+8) {
+		return "", errors.New("поврежденный контейнер: превышен допустимый размер")
 	}
 
 	salt, err := base64.StdEncoding.DecodeString(ed.Salt)
@@ -111,6 +139,15 @@ func (cm *CryptoManager) Decrypt(ed *EncryptedData) (string, error) {
 	nonce, err := base64.StdEncoding.DecodeString(ed.Nonce)
 	if err != nil {
 		return "", err
+	}
+	if len(salt) != SaltSize {
+		return "", errors.New("поврежденный контейнер: неверная длина salt")
+	}
+	if len(ciphertext) < 16 || len(ciphertext) > CiphertextLimit {
+		return "", errors.New("поврежденный контейнер: неверная длина ciphertext")
+	}
+	if len(nonce) != 12 {
+		return "", errors.New("поврежденный контейнер: неверная длина nonce")
 	}
 
 	key := argon2.IDKey(cm.masterPassword, salt, 3, 128*1024, 4, 32)

@@ -34,8 +34,28 @@ export function Logout() {
   return window['go']['main']['App']['Logout']();
 }
 
-export function ResetVault() {
-  return window['go']['main']['App']['ResetVault']();
+export function BeginVaultReset() {
+  return window['go']['main']['App']['BeginVaultReset']();
+}
+
+export function CancelVaultReset(arg1) {
+  return window['go']['main']['App']['CancelVaultReset'](arg1);
+}
+
+export function ResetVault(arg1) {
+  return window['go']['main']['App']['ResetVault'](arg1);
+}
+
+export function PrepareVaultRecovery(arg1) {
+  return window['go']['main']['App']['PrepareVaultRecovery'](arg1);
+}
+
+export function ConfirmVaultRecovery(arg1) {
+  return window['go']['main']['App']['ConfirmVaultRecovery'](arg1);
+}
+
+export function CancelVaultRecovery(arg1) {
+  return window['go']['main']['App']['CancelVaultRecovery'](arg1);
 }
 
 export function UpdateAccount(arg1, arg2, arg3, arg4) {
