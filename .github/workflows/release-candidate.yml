@@ -27,16 +27,28 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Verify embedded frontend assets
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -Path frontend/dist -PathType Container)) {
+            throw "frontend/dist was not created by the frontend build"
+          }
+          if (-not (Test-Path -Path frontend/dist/index.html -PathType Leaf)) {
+            throw "frontend/dist/index.html is missing"
+          }
+
       - name: Test and build Go packages
         run: |
           go test ./...
           go build ./...
-
-      - name: Test and build frontend
-        working-directory: frontend
-        run: |
-          npm test
-          npm run build
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
