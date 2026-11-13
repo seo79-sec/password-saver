@@ -36,6 +36,7 @@ var replaceVaultFile = replaceFile
 var syncVaultTempFile = func(f *os.File) error { return f.Sync() }
 var syncVaultDirectory = syncDirectory
 var errVaultCorrupt = errors.New("файл хранилища поврежден")
+var errVaultWrongPassword = errors.New("неверный мастер-пароль")
 var errVaultRecoveryAvailable = errors.New("основной файл поврежден или отсутствует; доступна проверенная резервная копия")
 var errVaultCommitUncertain = errors.New("запись файла заменена, но синхронизация каталога не подтверждена")
 var vaultFileMu sync.Mutex
@@ -214,7 +215,7 @@ func loadVaultData(cm *crypto.CryptoManager, fileData []byte) (*Vault, error) {
 	// 5. Расшифровываем
 	decryptedJson, err := cm.Decrypt(&encryptedData)
 	if err != nil {
-		return nil, errors.New("неверный мастер-пароль") // Расшифровка не удалась
+		return nil, errVaultWrongPassword // Расшифровка не удалась
 	}
 
 	// 6. Превращаем расшифрованный JSON обратно в структуру Vault
