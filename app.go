@@ -19,13 +19,18 @@ import (
 
 // App struct управляет состоянием приложения и сессией в RAM
 type App struct {
-	mu             sync.RWMutex
-	ctx            context.Context
-	cm             *crypto.CryptoManager
-	vault          *Vault
-	twoFAVerified  bool // НОВОЕ: Флаг успешного прохождения 2FA
-	pendingReset   resetChallenge
-	pendingRecover recoveryChallenge
+	mu               sync.RWMutex
+	ctx              context.Context
+	cm               *crypto.CryptoManager
+	vault            *Vault
+	twoFAVerified    bool // НОВОЕ: Флаг успешного прохождения 2FA
+	pendingReset     resetChallenge
+	pendingRecover   recoveryChallenge
+	idleTimer        *time.Timer
+	idleTimeout      time.Duration
+	lastActivity     time.Time
+	totpFailures     int
+	totpBlockedUntil time.Time
 }
 
 type resetChallenge struct {
@@ -44,7 +49,7 @@ const challengeLifetime = 2 * time.Minute
 var recoveryChallengeLifetime = challengeLifetime
 
 func NewApp() *App {
-	return &App{}
+	return &App{idleTimeout: time.Minute}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -60,6 +65,9 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) Login(password string) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if time.Now().Before(a.totpBlockedUntil) {
+		return false, errors.New("слишком много неверных кодов 2FA; попробуйте позже")
+	}
 	// A repeated login starts a fresh authentication flow, including after a
 	// previous session had completed the second factor.
 	a.logoutLocked()
@@ -80,6 +88,8 @@ func (a *App) Login(password string) (bool, error) {
 
 	// Если 2FA НЕ включена, мы автоматически считаем её "пройденной"
 	a.twoFAVerified = !v.TwoFAEnabled
+	a.lastActivity = time.Now()
+	a.armIdleTimerLocked()
 
 	// Возвращаем флаг (нужна ли 2FA) и nil (ошибок нет)
 	return v.TwoFAEnabled, nil
@@ -93,6 +103,10 @@ func (a *App) Logout() {
 }
 
 func (a *App) logoutLocked() {
+	if a.idleTimer != nil {
+		a.idleTimer.Stop()
+		a.idleTimer = nil
+	}
 	// Исправлена опечатка: используем верное имя поля a.cm
 	if a.cm != nil {
 		a.cm.Wipe() // Принудительно забиваем нулями область RAM с паролем
@@ -102,6 +116,70 @@ func (a *App) logoutLocked() {
 	a.twoFAVerified = false // Сбрасываем статус 2FA
 	a.clearPendingChallengesLocked()
 	// Удаляем ссылку на открытые данные аккаунтов, отправляя их под сборщик мусора
+}
+
+const maxTOTPFailures = 5
+const totpLockoutDuration = time.Minute
+
+func (a *App) armIdleTimerLocked() {
+	if a.idleTimer != nil {
+		a.idleTimer.Stop()
+	}
+	if a.cm == nil || a.idleTimeout <= 0 {
+		return
+	}
+	remaining := time.Until(a.lastActivity.Add(a.idleTimeout))
+	if remaining < 0 {
+		remaining = 0
+	}
+	a.idleTimer = time.AfterFunc(remaining, func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.cm == nil {
+			return
+		}
+		if time.Since(a.lastActivity) >= a.idleTimeout {
+			a.logoutLocked()
+			return
+		}
+		a.armIdleTimerLocked()
+	})
+}
+
+// SetIdleTimeout accepts only the UI's supported timeout choices.
+func (a *App) SetIdleTimeout(minutes int) error {
+	if minutes != 1 && minutes != 5 && minutes != 10 && minutes != 15 {
+		return errors.New("недопустимый тайм-аут блокировки")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.idleTimeout = time.Duration(minutes) * time.Minute
+	if a.cm != nil {
+		a.lastActivity = time.Now()
+		a.armIdleTimerLocked()
+	}
+	return nil
+}
+
+// TouchActivity refreshes the backend lock timer; the UI timer is only a convenience.
+func (a *App) TouchActivity() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cm != nil {
+		a.lastActivity = time.Now()
+		a.armIdleTimerLocked()
+	}
+}
+
+// CheckInactivity enforces the backend deadline after window focus or resume,
+// including cases where operating-system sleep paused frontend timers.
+func (a *App) CheckInactivity() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cm != nil && time.Since(a.lastActivity) >= a.idleTimeout {
+		a.logoutLocked()
+	}
+	return a.isLockedLocked()
 }
 
 // IsLocked проверяет текущий статус блокировки хранилища
@@ -474,10 +552,16 @@ func (a *App) ConfirmAndEnable2FA(secret, code string) error {
 	}
 
 	// Проверяем, правильный ли код ввел пользователь
+	if err := a.checkTOTPAttemptsLocked(); err != nil {
+		return err
+	}
 	valid := totp.Validate(code, secret)
 	if !valid {
+		a.recordTOTPFailureLocked()
 		return errors.New("неверный код подтверждения")
 	}
+	a.totpFailures = 0
+	a.totpBlockedUntil = time.Time{}
 
 	// Сохраняем настройки в хранилище
 	return a.updateVault(func(v *Vault) {
@@ -497,6 +581,9 @@ func (a *App) Verify2FA(code string) error {
 	if a.twoFAVerified {
 		return nil
 	}
+	if err := a.checkTOTPAttemptsLocked(); err != nil {
+		return err
+	}
 
 	if !a.vault.TwoFAEnabled {
 		return nil // 2FA не включена, пропускаем
@@ -504,10 +591,30 @@ func (a *App) Verify2FA(code string) error {
 
 	valid := totp.Validate(code, a.vault.TwoFASecret)
 	if !valid {
+		a.recordTOTPFailureLocked()
 		return errors.New("неверный код 2FA")
 	}
 
 	// Код верный! Разблокируем полный доступ к функциям приложения
 	a.twoFAVerified = true
+	a.totpFailures = 0
+	a.totpBlockedUntil = time.Time{}
+	a.lastActivity = time.Now()
+	a.armIdleTimerLocked()
 	return nil
+}
+
+func (a *App) checkTOTPAttemptsLocked() error {
+	if time.Now().Before(a.totpBlockedUntil) {
+		return errors.New("слишком много неверных кодов 2FA; попробуйте позже")
+	}
+	return nil
+}
+
+func (a *App) recordTOTPFailureLocked() {
+	a.totpFailures++
+	if a.totpFailures >= maxTOTPFailures {
+		a.totpBlockedUntil = time.Now().Add(totpLockoutDuration)
+		a.totpFailures = 0
+	}
 }

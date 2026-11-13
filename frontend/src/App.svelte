@@ -5,8 +5,9 @@
   import { 
     Login, Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
-    Generate2FA, ConfirmAndEnable2FA, Verify2FA 
+    Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
@@ -20,6 +21,8 @@
   let newTitle = '';
   let newLogin = '';
   let newPass = '';
+  let showFormPassword = false;
+  let visiblePasswordIDs = new Set();
   let selectedCategory = 'Общие';
   let editingId = null; 
   
@@ -33,11 +36,25 @@
   let totpSecret = '';
   let totpQRCode = '';
   let setupCode = '';
+  let idleMinutes = 1;
+  let clipboardSeconds = 15;
+  let clipboardController;
+  let lockPoll;
+  let lastActivitySent = 0;
+  const sessionGeneration = createGenerationGuard();
+  const breachGeneration = createGenerationGuard();
+  let breachController;
   
   // --- ЛОГИКА ТЕМЫ ---
   let isDarkMode = true;
 
   onMount(() => {
+    idleMinutes = validChoice(localStorage.getItem('idleLockMinutes'), IDLE_MINUTES, 1);
+    clipboardSeconds = validChoice(localStorage.getItem('clipboardClearSeconds'), CLIPBOARD_SECONDS, 15);
+    SetIdleTimeout(idleMinutes).catch(() => {});
+    clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => {
+      toastMessage = 'Не удалось получить доступ к буферу обмена';
+    });
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'light') {
       isDarkMode = false;
@@ -101,36 +118,93 @@
   let breachChecked = false;
   let breachedCount = 0;
 
-  async function checkBreaches() {
-    isCheckingBreaches = true; breachedCount = 0;
-    for (let acc of accounts) {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(acc.password);
-      const hashBuffer = await window.crypto.subtle.digest('SHA-1', data);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-      const prefix = hashHex.substring(0, 5); const suffix = hashHex.substring(5);
-      try {
-        const res = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`);
-        const text = await res.text();
-        let found = false;
-        for (let line of text.split('\n')) {
-          if (line.split(':')[0] === suffix) { breachedCount++; found = true; acc.isBreached = true; break; }
-        }
-        if (!found) acc.isBreached = false;
-      } catch (e) { console.error(e); }
-    }
-    accounts = [...accounts]; isCheckingBreaches = false; breachChecked = true;
+  function cancelBreachCheck() {
+    breachGeneration.invalidate();
+    breachController?.abort();
+    breachController = null;
+    isCheckingBreaches = false;
   }
 
-  let idleTimer;
-  const IDLE_TIME_MS = 1 * 60 * 1000; 
-  function resetTimer() {
-    if (!isLoggedIn) return;
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { lockReason = 'Хранилище заблокировано из-за неактивности (1 мин)'; handleLogout(); }, IDLE_TIME_MS);
+  async function checkBreaches() {
+    cancelBreachCheck();
+    const checkToken = breachGeneration.capture();
+    const sessionToken = sessionGeneration.capture();
+    const controller = new AbortController();
+    breachController = controller;
+    isCheckingBreaches = true; breachedCount = 0;
+    try {
+      const result = await checkHIBPPasswords(accounts, {
+        signal: controller.signal,
+        fetchImpl: fetch,
+        digest: bytes => window.crypto.subtle.digest('SHA-1', bytes),
+      });
+      if (!breachGeneration.isCurrent(checkToken) || !sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      const byID = new Map(result.results.map(item => [item.id, item.breached]));
+      accounts = accounts.map(account => {
+        if (byID.has(account.id)) account.isBreached = byID.get(account.id);
+        return account;
+      });
+      breachedCount = result.results.filter(item => item.breached).length;
+      breachChecked = !result.failed;
+      toastMessage = result.failed ? 'Сетевая проверка утечек не завершена. SHA-1 префиксы отправляются в HIBP; открытые пароли не отправляются.' : 'Проверка выполнена через сеть HIBP (отправляется только SHA-1 префикс)';
+      setTimeout(() => toastMessage = '', 4500);
+    } catch (error) {
+      if (error?.name !== 'AbortError' && breachGeneration.isCurrent(checkToken) && sessionGeneration.isCurrent(sessionToken) && isLoggedIn) {
+        console.error(error);
+        toastMessage = 'Не удалось проверить утечки через сеть HIBP';
+        setTimeout(() => toastMessage = '', 4500);
+      }
+    } finally {
+      if (breachGeneration.isCurrent(checkToken)) {
+        isCheckingBreaches = false;
+        breachController = null;
+      }
+    }
   }
-  $: if (isLoggedIn) { resetTimer(); lockReason = ''; } else { clearTimeout(idleTimer); }
+
+  function handleActivity() {
+    if (!isLoggedIn) return;
+    const now = Date.now();
+    if (now - lastActivitySent > 1000) { lastActivitySent = now; TouchActivity().catch(() => {}); }
+  }
+
+  function clearSensitiveState(reason = '') {
+    sessionGeneration.invalidate();
+    cancelBreachCheck();
+    isLoggedIn = false; accounts = []; masterPassword = ''; newPass = ''; twoFACode = '';
+    setupCode = ''; totpSecret = ''; totpQRCode = ''; show2FASetupModal = false;
+    show2FAInput = false; visiblePasswordIDs = new Set(); showFormPassword = false;
+    showAbout = false; dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
+    cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
+    if (reason) lockReason = reason;
+  }
+
+  function setIdlePreference(event) {
+    idleMinutes = Number(event.currentTarget.value); localStorage.setItem('idleLockMinutes', String(idleMinutes));
+    SetIdleTimeout(idleMinutes).catch(() => { toastMessage = 'Не удалось применить тайм-аут блокировки'; });
+  }
+  function setClipboardPreference(event) {
+    clipboardSeconds = Number(event.currentTarget.value); localStorage.setItem('clipboardClearSeconds', String(clipboardSeconds));
+    clipboardController?.cancel();
+    clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => { toastMessage = 'Не удалось получить доступ к буферу обмена'; });
+  }
+
+  onMount(() => {
+    lockPoll = setInterval(async () => {
+      if (!isLoggedIn) return;
+      try { if (await IsLocked()) clearSensitiveState('Хранилище заблокировано по тайм-ауту'); }
+      catch (error) { console.error(error); }
+    }, 1000);
+    const checkOnReturn = async () => {
+      if (document.visibilityState !== 'visible' || !isLoggedIn) return;
+      try { if (await CheckInactivity()) { clearSensitiveState('Хранилище заблокировано по тайм-ауту'); return; } }
+      catch (error) { console.error(error); }
+      handleActivity();
+    };
+    document.addEventListener('visibilitychange', checkOnReturn);
+    window.addEventListener('focus', checkOnReturn);
+    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); cancelBreachCheck(); clipboardController?.cancel(); };
+  });
 
   let strengthColor = 'transparent';
   $: {
@@ -152,24 +226,10 @@
 
   async function copyData(text) {
     try {
-      await navigator.clipboard.writeText(text);
+      const ok = await clipboardController.copy(text);
+      if (!ok) throw new Error('clipboard write denied');
       toastMessage = 'Скопировано!'; setTimeout(() => toastMessage = '', 2000);
-      setTimeout(() => { navigator.clipboard.writeText(''); }, 15000);
     } catch (err) { console.error(err); }
-  }
-
-  function getFaviconUrl(serviceName) {
-    if (!serviceName) return '';
-    let realName = serviceName.split('|||')[0];
-    let domain = realName.toLowerCase().trim().replace(/\s+/g, '');
-    if (!domain.includes('.')) {
-      if (domain === 'vk' || domain === 'вк') domain = 'vk.com';
-      else if (domain === 'mail' || domain === 'мэйл') domain = 'mail.ru';
-      else if (domain === 'yandex' || domain === 'яндекс') domain = 'ya.ru';
-      else if (domain === 'gosuslugi' || domain === 'госуслуги') domain = 'gosuslugi.ru';
-      else domain += '.com';
-    }
-    return `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
   }
 
   // --- ОБНОВЛЕННЫЕ ФУНКЦИИ ВХОДА (2FA) ---
@@ -177,9 +237,11 @@
     try {
       const requires2FA = await Login(masterPassword); 
       if (requires2FA) {
+        masterPassword = '';
         show2FAInput = true;
         errorMessage = '';
       } else {
+        sessionGeneration.advance();
         isLoggedIn = true;
         errorMessage = '';
         lockReason = '';
@@ -194,16 +256,18 @@
             const requires2FA = await ConfirmVaultRecovery(recoveryToken);
             errorMessage = '';
             if (requires2FA) { show2FAInput = true; }
-            else { isLoggedIn = true; masterPassword = ''; loadAccounts(); }
+            else { sessionGeneration.advance(); isLoggedIn = true; masterPassword = ''; loadAccounts(); }
           } catch (recoveryErr) { errorMessage = recoveryErr; }
-        }, () => CancelVaultRecovery(recoveryToken));
-      } catch { errorMessage = err; }
+        }, () => { CancelVaultRecovery(recoveryToken); masterPassword = ''; });
+        masterPassword = '';
+      } catch { errorMessage = err; masterPassword = ''; }
     }
   }
 
   async function handleVerify2FA() {
     try {
       await Verify2FA(twoFACode);
+      sessionGeneration.advance();
       isLoggedIn = true;
       show2FAInput = false;
       twoFACode = '';
@@ -211,14 +275,12 @@
       errorMessage = '';
       lockReason = '';
       loadAccounts();
-    } catch (err) { errorMessage = err; }
+    } catch (err) { errorMessage = err; twoFACode = ''; masterPassword = ''; }
   }
 
-  async function handleLogout() {
-    await Logout(); 
-    isLoggedIn = false; show2FAInput = false; twoFACode = ''; accounts = []; 
-    searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все'; 
-    cancelEdit(); showAbout = false;
+  async function handleLogout(reason = '') {
+    clearSensitiveState(reason);
+    try { await Logout(); } catch (error) { console.error(error); }
   }
 
   async function handleReset() {
@@ -227,7 +289,7 @@
       showConfirm("Сброс хранилища", "ВНИМАНИЕ! Это действие навсегда удалит все зашифрованные пароли и резервную копию.\nВы уверены?", async () => {
         try {
           await ResetVault(resetToken);
-          errorMessage = ''; lockReason = ''; masterPassword = ''; show2FAInput = false;
+          clearSensitiveState(); errorMessage = ''; lockReason = '';
           showAlert("Успешно", "Ваше хранилище было полностью сброшено.");
         } catch (err) { errorMessage = err; }
       }, () => CancelVaultReset(resetToken));
@@ -235,7 +297,13 @@
   }
 
   async function loadAccounts() {
-    try { accounts = await GetAccounts() || []; breachChecked = false; breachedCount = 0; } catch (err) { console.error(err); }
+    const token = sessionGeneration.capture();
+    try {
+      await resolveForGeneration(GetAccounts(), sessionGeneration, token, result => {
+        if (!isLoggedIn) return;
+        accounts = result || []; breachChecked = false; breachedCount = 0;
+      });
+    } catch (err) { if (sessionGeneration.isCurrent(token) && isLoggedIn) console.error(err); }
   }
 
   async function handleSave() {
@@ -251,10 +319,17 @@
   function startEdit(acc) {
     editingId = acc.id; const [title, category] = acc.title.split('|||');
     newTitle = title; newLogin = acc.login; newPass = acc.password; selectedCategory = category || 'Общие';
+    showFormPassword = false;
     window.scrollTo({ top: 0, behavior: 'smooth' }); 
   }
 
-  function cancelEdit() { editingId = null; newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; }
+  function cancelEdit() { editingId = null; newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; showFormPassword = false; }
+
+  function togglePassword(id) {
+    visiblePasswordIDs = toggleSecretVisibility(visiblePasswordIDs, id);
+  }
+
+  function close2FASetup() { show2FASetupModal = false; totpSecret = ''; totpQRCode = ''; setupCode = ''; }
 
   async function handleDelete(id) {
     showConfirm("Удаление", "Удалить эту запись безвозвратно?", async () => {
@@ -277,13 +352,13 @@
       await ConfirmAndEnable2FA(totpSecret, setupCode);
       showAlert("Успешно", "Двухфакторная аутентификация успешно включена!");
       show2FASetupModal = false;
-      setupCode = '';
+      close2FASetup();
       loadAccounts(); 
     } catch (err) { showAlert("Ошибка", err); }
   }
 </script>
 
-<svelte:window on:mousemove={resetTimer} on:keydown={resetTimer} on:click={resetTimer} />
+<svelte:window on:mousemove={handleActivity} on:keydown={handleActivity} on:click={handleActivity} on:touchstart={handleActivity} on:wheel={handleActivity} />
 
 <div class="app-background"></div>
 
@@ -316,7 +391,7 @@
           <p class="accent-text" style="margin: 0; font-size: 0.9rem;">Включена двухфакторная защита</p>
           <input type="text" bind:value={twoFACode} placeholder="Введите 6-значный код TOTP" maxlength="6" style="text-align: center; letter-spacing: 4px; font-size: 1.2rem;" on:keydown={(e) => e.key === 'Enter' && handleVerify2FA()}/>
           <button class="submit-btn" style="height: 42px;" on:click={handleVerify2FA}>Подтвердить код</button>
-          <button class="btn-micro" style="margin-top: 0;" on:click={() => { show2FAInput = false; twoFACode = ''; }}>← Назад к паролю</button>
+          <button class="btn-micro" style="margin-top: 0;" on:click={async () => { await Logout(); clearSensitiveState(); errorMessage = ''; }}>← Назад к паролю</button>
         </div>
       {/if}
       
@@ -339,7 +414,7 @@
           <button class="btn-theme" on:click={toggleTheme} title="Переключить тему">{isDarkMode ? '☀️' : '🌙'}</button>
           <button class="btn-about" style="border-color: var(--accent-color); color: var(--accent-color);" on:click={open2FASetup}>🛡️ Настроить 2FA</button>
           <button class="btn-about" on:click={() => showAbout = true}>ℹ️ О проекте</button>
-          <button class="btn-lock" on:click={handleLogout}>🔒 Заблокировать хранилище</button>
+          <button class="btn-lock" on:click={() => handleLogout('Хранилище заблокировано вручную')}>🔒 Заблокировать хранилище</button>
         </div>
       </div>
 
@@ -354,7 +429,7 @@
               {#if isCheckingBreaches}<div class="skeleton-pulse">...</div>{:else if breachChecked}<span in:fade>{breachedCount}</span>{:else}?{/if}
             </div>
             <div class="stat-label">Утечки</div>
-            {#if !isCheckingBreaches}<button class="btn-micro" on:click={checkBreaches}>{breachChecked ? 'Обновить' : 'Проверить'}</button>{/if}
+            {#if !isCheckingBreaches}<button class="btn-micro" on:click={() => showConfirm('Проверка через интернет', 'HIBP получит только первые 5 символов локально вычисленного SHA-1 хеша пароля. Открытый пароль не отправляется. Выполнить сетевую проверку?', checkBreaches)}>{breachChecked ? 'Обновить' : 'Проверить'}</button>{/if}
           </div>
         </div>
       {/if}
@@ -374,11 +449,29 @@
         </div>
       </div>
 
+      <div class="settings-panel">
+        <label>Автоблокировка
+          <select bind:value={idleMinutes} on:change={setIdlePreference}>
+            {#each IDLE_MINUTES as minutes}<option value={minutes}>{minutes} мин</option>{/each}
+          </select>
+        </label>
+        <label>Очистка буфера обмена
+          <select bind:value={clipboardSeconds} on:change={setClipboardPreference}>
+            {#each CLIPBOARD_SECONDS as seconds}<option value={seconds}>{seconds} сек</option>{/each}
+          </select>
+        </label>
+      </div>
+
       <div class="add-form-container {editingId ? 'editing-mode' : ''}">
         <div class="grid-row form-grid">
           <input type="text" bind:value={newTitle} placeholder="Название сервиса (например, GitHub)" />
           <input type="text" bind:value={newLogin} placeholder="Логин / Email" />
-          <input type="text" bind:value={newPass} placeholder="Пароль" style="border-bottom: 2px solid {strengthColor}" />
+          {#if showFormPassword}
+            <input type="text" bind:value={newPass} placeholder="Пароль" style="border-bottom: 2px solid {strengthColor}" />
+          {:else}
+            <input type="password" bind:value={newPass} placeholder="Пароль" style="border-bottom: 2px solid {strengthColor}" />
+          {/if}
+          <button class="btn-micro" type="button" on:click={() => showFormPassword = !showFormPassword}>{showFormPassword ? 'Скрыть' : 'Показать пароль'}</button>
           <select bind:value={selectedCategory} class="category-select">{#each categories as cat}<option value={cat}>{cat}</option>{/each}</select>
           <div class="form-buttons">
             <button class="submit-btn" on:click={handleSave}>{editingId ? 'Сохранить' : 'Добавить'}</button>
@@ -413,15 +506,17 @@
           {#each filteredAccounts as acc (acc.id)}
             <div animate:flip={{duration: 300}} in:fly={{ y: 20, duration: 300 }} out:slide={{ duration: 200 }} class="grid-row account-card {editingId === acc.id ? 'row-editing' : ''}">
               <span class="acc-title">
-                <img src={getFaviconUrl(acc.title)} alt="" class="favicon" />
+                <span class="favicon" aria-hidden="true">🔐</span>
                 <div class="title-meta">
                   <span class="main-title" title={acc.title.split('|||')[0]}>{acc.title.split('|||')[0]}</span>
                   {#if isPasswordOld(acc.updatedAt)}<span class="old-badge" title="Пароль не обновлялся более 180 дней">⌛ Устарел</span>{/if}
                 </div>
               </span>
               <span class="acc-login action-text" on:click={() => copyData(acc.login)} title="Скопировать логин">{acc.login} <span class="copy-icon">📋</span></span>
-              <span class="acc-pass action-text {acc.isBreached ? 'breached-text' : ''}" on:click={() => copyData(acc.password)} title="Скопировать пароль">
-                {#if acc.isBreached}⚠️{/if} {acc.password} <span class="copy-icon">📋</span>
+              <span class="acc-pass {acc.isBreached ? 'breached-text' : ''}">
+                {#if acc.isBreached}⚠️{/if} {isSecretVisible(visiblePasswordIDs, acc.id) ? acc.password : '••••••••'}
+                <button class="btn-micro" on:click={() => togglePassword(acc.id)} aria-label={isSecretVisible(visiblePasswordIDs, acc.id) ? 'Скрыть пароль' : 'Показать пароль'}>{isSecretVisible(visiblePasswordIDs, acc.id) ? 'Скрыть' : 'Показать'}</button>
+                <button class="btn-micro" on:click={() => copyData(acc.password)} title="Скопировать пароль">📋</button>
               </span>
               <span class="acc-category">
                 <span class="category-badge" style="background-color: {categoryColors[acc.title.split('|||')[1] || 'Общие']}1A; color: {categoryColors[acc.title.split('|||')[1] || 'Общие']}; border: 1px solid {categoryColors[acc.title.split('|||')[1] || 'Общие']}40;">{acc.title.split('|||')[1] || 'Общие'}</span>
@@ -455,9 +550,9 @@
   {/if}
 
   {#if show2FASetupModal}
-    <div class="modal-overlay" transition:fade on:click|self={() => show2FASetupModal = false}>
+    <div class="modal-overlay" transition:fade on:click|self={close2FASetup}>
       <div class="modal-content glass-panel" style="text-align: center; max-width: 400px;" transition:fly={{y: 20}}>
-        <button class="close-btn" on:click={() => show2FASetupModal = false}>✖</button>
+        <button class="close-btn" on:click={close2FASetup}>✖</button>
         <h3 class="dialog-title">Настройка 2FA</h3>
         <p style="font-size: 0.9rem; color: var(--text-muted);">
           Отсканируйте этот QR-код в приложении Google Authenticator или Яндекс Ключ
@@ -474,7 +569,7 @@
         <div style="margin-top: 20px;">
           <input type="text" bind:value={setupCode} placeholder="Введите код из приложения" maxlength="6" style="text-align: center; margin-bottom: 15px; letter-spacing: 2px;" />
           <div class="dialog-buttons">
-            <button class="btn-cancel" on:click={() => show2FASetupModal = false}>Отмена</button>
+            <button class="btn-cancel" on:click={close2FASetup}>Отмена</button>
             <button class="submit-btn" style="height: 38px;" on:click={handleConfirm2FA}>Включить защиту</button>
           </div>
         </div>
@@ -630,6 +725,9 @@
   .custom-checkbox { width: 18px; height: 18px; accent-color: var(--accent-color); cursor: pointer; }
   
   .gen-btn { padding: 10px 20px; white-space: nowrap; height: 38px; display: flex; align-items: center; justify-content: center; }
+  .settings-panel { display: flex; gap: 20px; flex-wrap: wrap; margin: 0 0 24px; padding: 12px 15px; background: var(--card-bg); border: 1px solid var(--border-main); border-radius: 8px; }
+  .settings-panel label { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: .9rem; }
+  .settings-panel select { height: 34px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-main); border-radius: 6px; padding: 4px 8px; }
 
   /* --- ОБЩИЕ КНОПКИ --- */
   button { border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }

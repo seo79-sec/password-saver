@@ -42,6 +42,10 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Test frontend security helpers
+        working-directory: frontend
+        run: npm test
+
       - name: Run Go tests
         run: go test ./...
 
