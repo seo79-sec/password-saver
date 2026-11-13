@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AddAccount(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function BeginCancelV2Preparation():Promise<string>;
+
 export function BeginVaultReset():Promise<string>;
 
 export function CancelVaultRecovery(arg1:string):Promise<void>;
@@ -14,6 +16,10 @@ export function CheckInactivity():Promise<boolean>;
 
 export function ConfirmAndEnable2FA(arg1:string,arg2:string):Promise<void>;
 
+export function ConfirmCancelV2Preparation(arg1:string):Promise<void>;
+
+export function ConfirmV2Migration(arg1:string,arg2:string,arg3:string):Promise<void>;
+
 export function ConfirmVaultRecovery(arg1:string):Promise<boolean>;
 
 export function DeleteAccount(arg1:string):Promise<void>;
@@ -22,11 +28,17 @@ export function Generate2FA():Promise<main.TOTPSetup>;
 
 export function GetAccounts():Promise<Array<main.Account>>;
 
+export function GetVaultStatus():Promise<main.VaultPublicStatus>;
+
 export function IsLocked():Promise<boolean>;
 
 export function Login(arg1:string):Promise<boolean>;
 
+export function LoginV2(arg1:string):Promise<boolean>;
+
 export function Logout():Promise<void>;
+
+export function PrepareV2Migration(arg1:string,arg2:string):Promise<string>;
 
 export function PrepareVaultRecovery(arg1:string):Promise<string>;
 

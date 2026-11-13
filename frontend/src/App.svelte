@@ -3,15 +3,18 @@
   import { fade, slide, fly } from 'svelte/transition';
   import { flip } from 'svelte/animate';
   import { 
-    Login, Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
+    Login, LoginV2, GetVaultStatus, PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
+    Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, friendlyBackendError } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
   let isLoggedIn = false;
+  let vaultStatus = { state: 'loading', v2ContainerPresent: false, preparationFresh: false };
+  let loginFormat = 'v1';
   let masterPassword = '';
   let errorMessage = '';
   let lockReason = ''; 
@@ -27,6 +30,16 @@
   let editingId = null; 
   
   let showAbout = false;
+
+  let showMigrationModal = false;
+  let migrationStage = 'reauth';
+  let migrationPassword = '';
+  let migrationTotp = '';
+  let activationPassword = '';
+  let activationTotp = '';
+  let activationToken = '';
+  let migrationBusy = false;
+  let migrationError = '';
 
   // --- ЛОГИКА 2FA ---
   let show2FAInput = false; 
@@ -49,6 +62,7 @@
   let isDarkMode = true;
 
   onMount(() => {
+    refreshVaultStatus();
     idleMinutes = validChoice(localStorage.getItem('idleLockMinutes'), IDLE_MINUTES, 1);
     clipboardSeconds = validChoice(localStorage.getItem('clipboardClearSeconds'), CLIPBOARD_SECONDS, 15);
     SetIdleTimeout(idleMinutes).catch(() => {});
@@ -175,6 +189,8 @@
     setupCode = ''; totpSecret = ''; totpQRCode = ''; show2FASetupModal = false;
     show2FAInput = false; visiblePasswordIDs = new Set(); showFormPassword = false;
     showAbout = false; dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
+    showMigrationModal = false; migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
+    activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
@@ -234,8 +250,14 @@
 
   // --- ОБНОВЛЕННЫЕ ФУНКЦИИ ВХОДА (2FA) ---
   async function handleLogin() {
+    loginFormat = loginModeForVaultStatus(vaultStatus);
+    if (loginFormat === 'blocked') {
+      await refreshVaultStatus();
+      errorMessage = friendlyBackendError('ambiguous selector state');
+      return;
+    }
     try {
-      const requires2FA = await Login(masterPassword); 
+      const requires2FA = loginFormat === 'v2' ? await LoginV2(masterPassword) : await Login(masterPassword);
       if (requires2FA) {
         masterPassword = '';
         show2FAInput = true;
@@ -249,6 +271,12 @@
         loadAccounts();      
       }
     } catch (err) {
+      if (loginFormat === 'v2') {
+        masterPassword = '';
+        errorMessage = friendlyBackendError(err);
+        await refreshVaultStatus();
+        return;
+      }
       try {
         const recoveryToken = await PrepareVaultRecovery(masterPassword);
         showConfirm("Восстановить резервную копию?", "Основной файл повреждён или отсутствует. Резервная копия проверена этим мастер-паролем. Текущий повреждённый файл будет сохранён рядом для диагностики, затем данные будут восстановлены из копии.", async () => {
@@ -257,10 +285,10 @@
             errorMessage = '';
             if (requires2FA) { show2FAInput = true; }
             else { sessionGeneration.advance(); isLoggedIn = true; masterPassword = ''; loadAccounts(); }
-          } catch (recoveryErr) { errorMessage = recoveryErr; }
+          } catch (recoveryErr) { errorMessage = friendlyBackendError(recoveryErr); }
         }, () => { CancelVaultRecovery(recoveryToken); masterPassword = ''; });
         masterPassword = '';
-      } catch { errorMessage = err; masterPassword = ''; }
+      } catch { errorMessage = friendlyBackendError(err); masterPassword = ''; }
     }
   }
 
@@ -275,12 +303,13 @@
       errorMessage = '';
       lockReason = '';
       loadAccounts();
-    } catch (err) { errorMessage = err; twoFACode = ''; masterPassword = ''; }
+    } catch (err) { errorMessage = friendlyBackendError(err); twoFACode = ''; masterPassword = ''; }
   }
 
   async function handleLogout(reason = '') {
     clearSensitiveState(reason);
     try { await Logout(); } catch (error) { console.error(error); }
+    await refreshVaultStatus();
   }
 
   async function handleReset() {
@@ -291,9 +320,9 @@
           await ResetVault(resetToken);
           clearSensitiveState(); errorMessage = ''; lockReason = '';
           showAlert("Успешно", "Ваше хранилище было полностью сброшено.");
-        } catch (err) { errorMessage = err; }
+        } catch (err) { errorMessage = friendlyBackendError(err); }
       }, () => CancelVaultReset(resetToken));
-    } catch (err) { errorMessage = err; }
+    } catch (err) { errorMessage = friendlyBackendError(err); }
   }
 
   async function loadAccounts() {
@@ -303,7 +332,22 @@
         if (!isLoggedIn) return;
         accounts = result || []; breachChecked = false; breachedCount = 0;
       });
-    } catch (err) { if (sessionGeneration.isCurrent(token) && isLoggedIn) console.error(err); }
+    } catch (err) {
+      if (sessionGeneration.isCurrent(token) && isLoggedIn) await reportBackendFailure(err);
+    }
+  }
+
+  async function reportBackendFailure(error) {
+    const message = friendlyBackendError(error);
+    try {
+      if (await IsLocked()) {
+        clearSensitiveState('Сессия закрыта. Войдите повторно.');
+        errorMessage = message;
+        return;
+      }
+    } catch (_) {}
+    toastMessage = message;
+    setTimeout(() => toastMessage = '', 4500);
   }
 
   async function handleSave() {
@@ -313,7 +357,7 @@
       if (editingId) { await UpdateAccount(editingId, combinedTitle, newLogin, newPass); editingId = null; } 
       else { await AddAccount(combinedTitle, newLogin, newPass); }
       newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; loadAccounts();
-    } catch (err) { console.error(err); }
+    } catch (err) { await reportBackendFailure(err); }
   }
 
   function startEdit(acc) {
@@ -333,7 +377,7 @@
 
   async function handleDelete(id) {
     showConfirm("Удаление", "Удалить эту запись безвозвратно?", async () => {
-      try { await DeleteAccount(id); if(editingId === id) cancelEdit(); loadAccounts(); } catch (err) { console.error(err); }
+      try { await DeleteAccount(id); if(editingId === id) cancelEdit(); loadAccounts(); } catch (err) { await reportBackendFailure(err); }
     });
   }
 
@@ -344,7 +388,7 @@
       totpSecret = setupData.secret;
       totpQRCode = setupData.qrCode;
       show2FASetupModal = true;
-    } catch (err) { showAlert("Ошибка", err); }
+    } catch (err) { showAlert("Ошибка", friendlyBackendError(err)); }
   }
 
   async function handleConfirm2FA() {
@@ -354,7 +398,87 @@
       show2FASetupModal = false;
       close2FASetup();
       loadAccounts(); 
-    } catch (err) { showAlert("Ошибка", err); }
+    } catch (err) { showAlert("Ошибка", friendlyBackendError(err)); }
+  }
+
+  async function refreshVaultStatus() {
+    try { vaultStatus = await GetVaultStatus(); }
+    catch (error) { vaultStatus = { state: 'ambiguous', v2ContainerPresent: false, preparationFresh: false }; console.error(error); }
+  }
+
+  function openMigrationModal() {
+    migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
+    activationPassword = ''; activationTotp = ''; activationToken = ''; migrationError = '';
+    showMigrationModal = true;
+  }
+
+  async function prepareV2Migration() {
+    if (migrationBusy) return;
+    migrationBusy = true; migrationError = '';
+    const password = migrationPassword;
+    const code = migrationTotp;
+    migrationPassword = ''; migrationTotp = '';
+    try {
+      activationToken = await PrepareV2Migration(password, code);
+      migrationStage = 'activate';
+      await refreshVaultStatus();
+    } catch (error) { migrationError = friendlyBackendError(error); }
+    finally { migrationBusy = false; }
+  }
+
+  async function confirmV2Migration() {
+    if (migrationBusy || !activationToken) return;
+    migrationBusy = true; migrationError = '';
+    const password = activationPassword;
+    const code = activationTotp;
+    activationPassword = ''; activationTotp = '';
+    try {
+      await ConfirmV2Migration(activationToken, password, code);
+      activationToken = '';
+      showMigrationModal = false;
+      clearSensitiveState('Хранилище обновлено до v2. Войдите повторно.');
+      await refreshVaultStatus();
+    } catch (error) {
+      const message = friendlyBackendError(error);
+      migrationError = message;
+      activationToken = '';
+      try {
+        if (await IsLocked()) {
+          clearSensitiveState('');
+          errorMessage = message;
+        }
+      } catch (_) {}
+      await refreshVaultStatus();
+    } finally { migrationBusy = false; }
+  }
+
+  async function beginCancelV2Preparation() {
+    if (migrationBusy) return;
+    migrationBusy = true; migrationError = '';
+    try {
+      activationToken = await BeginCancelV2Preparation();
+      migrationStage = 'cancel';
+      showMigrationModal = true;
+    } catch (error) { migrationError = friendlyBackendError(error); }
+    finally { migrationBusy = false; }
+  }
+
+  async function confirmCancelV2Preparation() {
+    if (migrationBusy || !activationToken) return;
+    migrationBusy = true; migrationError = '';
+    try {
+      await ConfirmCancelV2Preparation(activationToken);
+      activationToken = ''; showMigrationModal = false; migrationStage = 'reauth';
+      await refreshVaultStatus();
+      toastMessage = 'Подготовка отменена. Исходные файлы сохранены.';
+      setTimeout(() => toastMessage = '', 3000);
+    } catch (error) { migrationError = friendlyBackendError(error); await refreshVaultStatus(); }
+    finally { migrationBusy = false; }
+  }
+
+  function closeMigrationModal() {
+    showMigrationModal = false; migrationPassword = ''; migrationTotp = '';
+    activationPassword = ''; activationTotp = ''; activationToken = ''; migrationError = '';
   }
 </script>
 
@@ -381,17 +505,32 @@
         <p class="lock-warning" transition:slide>🔒 {lockReason}</p>
       {/if}
 
-      {#if !show2FAInput}
+      {#if vaultStatus.state === 'loading'}
+        <p class="subtitle">Проверка состояния хранилища…</p>
+      {:else if vaultStatus.state === 'ambiguous'}
+        <p class="error">Состояние формата хранилища неоднозначно или повреждено. Автоматический переход между форматами отключён.</p>
+      {:else if vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent}
+        <p class="error">Активный контейнер v2 отсутствует. Вход в v1 не предлагается.</p>
+      {:else}
+        <p class="subtitle">Активное хранилище: {vaultStatus.state === 'v2-active' ? 'v2' : vaultStatus.state === 'v1-prepared' ? 'v1 (v2 подготовлен)' : 'v1'}</p>
+      {/if}
+
+      {#if loginModeForVaultStatus(vaultStatus) === 'blocked'}
+        {#if vaultStatus.state === 'v1-prepared'}
+          <p class="warning-text">Незавершённую подготовку можно безопасно отменить. Файлы при отмене сохраняются.</p>
+          <button class="btn-secondary" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>
+        {/if}
+      {:else if !show2FAInput}
         <div class="input-group" transition:fade>
-          <input type="password" bind:value={masterPassword} placeholder="Введите мастер-пароль" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
-          <button class="btn-primary" on:click={handleLogin}>Разблокировать</button>
+          <input type="password" bind:value={masterPassword} placeholder="Введите мастер-пароль" autocomplete="current-password" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
+          <button class="btn-primary" disabled={vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
         </div>
       {:else}
         <div class="input-group" transition:fly={{ y: 20 }}>
           <p class="accent-text" style="margin: 0; font-size: 0.9rem;">Включена двухфакторная защита</p>
           <input type="text" bind:value={twoFACode} placeholder="Введите 6-значный код TOTP" maxlength="6" style="text-align: center; letter-spacing: 4px; font-size: 1.2rem;" on:keydown={(e) => e.key === 'Enter' && handleVerify2FA()}/>
           <button class="submit-btn" style="height: 42px;" on:click={handleVerify2FA}>Подтвердить код</button>
-          <button class="btn-micro" style="margin-top: 0;" on:click={async () => { await Logout(); clearSensitiveState(); errorMessage = ''; }}>← Назад к паролю</button>
+          <button class="btn-micro" style="margin-top: 0;" on:click={async () => { await Logout(); clearSensitiveState(); errorMessage = ''; await refreshVaultStatus(); }}>← Назад к паролю</button>
         </div>
       {/if}
       
@@ -399,9 +538,11 @@
         <p class="error" transition:slide>{errorMessage}</p>
       {/if}
 
-      <div class="reset-zone">
-        <button class="btn-outline-danger" on:click={handleReset}>Сбросить хранилище (Удалить всё)</button>
-      </div>
+      {#if vaultStatus.state === 'v1-active'}
+        <div class="reset-zone">
+          <button class="btn-outline-danger" on:click={handleReset}>Сбросить хранилище (Удалить всё)</button>
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="vault-box glass-panel" in:fade={{duration: 400}}>
@@ -417,6 +558,25 @@
           <button class="btn-lock" on:click={() => handleLogout('Хранилище заблокировано вручную')}>🔒 Заблокировать хранилище</button>
         </div>
       </div>
+
+      <section class="settings-panel vault-format-panel">
+        <div>
+          <strong>Безопасность хранилища</strong>
+          <div class="subtitle">
+            {vaultStatus.state === 'v2-active' ? 'Активен формат v2.' : vaultStatus.state === 'v1-prepared' ? (vaultStatus.v2ContainerPresent ? (vaultStatus.preparationFresh ? 'Контейнер v2 проверен, ожидает явной активации.' : 'Есть подготовленный контейнер v2; перед активацией он будет проверен заново.') : 'Подготовленный контейнер v2 отсутствует. Отмените подготовку, чтобы восстановить операции v1.') : 'Активен формат v1.'}
+          </div>
+        </div>
+        {#if vaultStatus.state === 'v1-active' || vaultStatus.state === 'v1-prepared'}
+          <div class="vault-format-actions">
+            <button class="btn-secondary" disabled={migrationBusy || (vaultStatus.state === 'v1-prepared' && !vaultStatus.v2ContainerPresent)} on:click={openMigrationModal}>
+              {vaultStatus.state === 'v1-prepared' ? 'Проверить и продолжить переход на v2' : 'Обновить хранилище до v2'}
+            </button>
+            {#if vaultStatus.state === 'v1-prepared'}
+              <button class="btn-cancel" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку</button>
+            {/if}
+          </div>
+        {/if}
+      </section>
 
       {#if accounts.length > 0}
         <div class="dashboard" transition:slide>
@@ -545,6 +705,52 @@
             <button class="btn-primary" on:click={closeDialog}>OK</button>
           {/if}
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showMigrationModal}
+    <div class="modal-overlay" role="presentation" transition:fade on:click|self={closeMigrationModal}>
+      <div class="modal-content glass-panel migration-modal" transition:fly={{y: 20}}>
+        <button class="close-btn" disabled={migrationBusy} on:click={closeMigrationModal}>✖</button>
+        {#if migrationStage === 'reauth'}
+          <h3 class="dialog-title">Подготовка хранилища v2</h3>
+          <p class="dialog-message">Будет создан отдельный зашифрованный контейнер. Исходные файлы v1 и резервная копия сохранятся. После проверки контейнер останется неактивным до отдельного подтверждения.</p>
+          <label class="migration-label">Повторно введите мастер-пароль
+            <input type="password" bind:value={migrationPassword} autocomplete="current-password" />
+          </label>
+          <label class="migration-label">Код TOTP, если включена 2FA
+            <input type="text" bind:value={migrationTotp} inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+          </label>
+          {#if migrationError}<p class="error">{migrationError}</p>{/if}
+          <div class="dialog-buttons">
+            <button class="btn-cancel" disabled={migrationBusy} on:click={closeMigrationModal}>Закрыть</button>
+            <button class="submit-btn" disabled={migrationBusy || !migrationPassword} on:click={prepareV2Migration}>{migrationBusy ? 'Проверка…' : 'Создать и проверить контейнер'}</button>
+          </div>
+        {:else if migrationStage === 'activate'}
+          <h3 class="dialog-title">Контейнер v2 проверен</h3>
+          <p class="dialog-message">Backend повторно открыл контейнер и сверил записи, настройки 2FA и секрет TOTP с активным хранилищем. Подтвердите активацию повторным вводом мастер-пароля и кода TOTP. После активации потребуется войти снова.</p>
+          <label class="migration-label">Мастер-пароль для подтверждения
+            <input type="password" bind:value={activationPassword} autocomplete="current-password" />
+          </label>
+          <label class="migration-label">Код TOTP, если включена 2FA
+            <input type="text" bind:value={activationTotp} inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+          </label>
+          {#if migrationError}<p class="error">{migrationError}</p>{/if}
+          <div class="dialog-buttons migration-buttons">
+            <button class="btn-cancel" disabled={migrationBusy} on:click={closeMigrationModal}>Оставить подготовку</button>
+            <button class="btn-danger-solid" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить переход…</button>
+            <button class="submit-btn" disabled={migrationBusy || !activationPassword || !activationToken} on:click={confirmV2Migration}>{migrationBusy ? 'Активация…' : 'Явно активировать v2'}</button>
+          </div>
+        {:else if migrationStage === 'cancel'}
+          <h3 class="dialog-title">Подтвердите отмену подготовки</h3>
+          <p class="dialog-message">Активным останется формат v1. Файл v2, основной файл v1 и резервная копия не будут изменены или удалены. Продолжить отмену?</p>
+          {#if migrationError}<p class="error">{migrationError}</p>{/if}
+          <div class="dialog-buttons">
+            <button class="btn-cancel" disabled={migrationBusy} on:click={closeMigrationModal}>Оставить подготовку</button>
+            <button class="btn-danger-solid" disabled={migrationBusy || !activationToken} on:click={confirmCancelV2Preparation}>{migrationBusy ? 'Отмена…' : 'Подтвердить отмену'}</button>
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -728,6 +934,10 @@
   .settings-panel { display: flex; gap: 20px; flex-wrap: wrap; margin: 0 0 24px; padding: 12px 15px; background: var(--card-bg); border: 1px solid var(--border-main); border-radius: 8px; }
   .settings-panel label { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: .9rem; }
   .settings-panel select { height: 34px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-main); border-radius: 6px; padding: 4px 8px; }
+  .vault-format-panel { align-items: center; justify-content: space-between; }
+  .vault-format-panel .subtitle { margin: 8px 0 0; }
+  .vault-format-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .warning-text { color: #e3b341; font-size: .9rem; line-height: 1.45; }
 
   /* --- ОБЩИЕ КНОПКИ --- */
   button { border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
@@ -811,9 +1021,20 @@
   .dialog-title { margin-top: 0; margin-bottom: 15px; font-size: 1.4rem; color: var(--text-heading); text-align: center; }
   .dialog-message { color: var(--text-main); font-size: 1rem; text-align: center; margin-bottom: 25px; white-space: pre-line; line-height: 1.5; }
   .dialog-buttons { display: flex; gap: 15px; justify-content: center; }
+  .migration-modal { max-height: 90vh; overflow-y: auto; }
+  .migration-label { display: block; margin: 0 0 14px; color: var(--text-muted); font-size: .9rem; }
+  .migration-label input { display: block; margin-top: 6px; }
+  .migration-buttons { flex-wrap: wrap; }
   
   .btn-cancel { background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--border-main); padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; flex: 1; height: 38px; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
   .btn-cancel:hover { background: var(--btn-hover); border-color: var(--text-muted); }
   .btn-danger-solid { background: #da3633; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; flex: 1; transition: 0.2s; height: 38px; display: flex; align-items: center; justify-content: center; }
   .btn-danger-solid:hover { background: #b32d2a; }
+  button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+  @media (max-width: 700px) {
+    .vault-format-panel { align-items: stretch; }
+    .vault-format-actions { flex-direction: column; }
+    .migration-modal { padding: 32px 22px; }
+    .migration-buttons { flex-direction: column; }
+  }
 </style>

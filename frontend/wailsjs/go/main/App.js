@@ -6,6 +6,10 @@ export function AddAccount(arg1, arg2, arg3) {
   return window['go']['main']['App']['AddAccount'](arg1, arg2, arg3);
 }
 
+export function BeginCancelV2Preparation() {
+  return window['go']['main']['App']['BeginCancelV2Preparation']();
+}
+
 export function BeginVaultReset() {
   return window['go']['main']['App']['BeginVaultReset']();
 }
@@ -26,6 +30,14 @@ export function ConfirmAndEnable2FA(arg1, arg2) {
   return window['go']['main']['App']['ConfirmAndEnable2FA'](arg1, arg2);
 }
 
+export function ConfirmCancelV2Preparation(arg1) {
+  return window['go']['main']['App']['ConfirmCancelV2Preparation'](arg1);
+}
+
+export function ConfirmV2Migration(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ConfirmV2Migration'](arg1, arg2, arg3);
+}
+
 export function ConfirmVaultRecovery(arg1) {
   return window['go']['main']['App']['ConfirmVaultRecovery'](arg1);
 }
@@ -42,6 +54,10 @@ export function GetAccounts() {
   return window['go']['main']['App']['GetAccounts']();
 }
 
+export function GetVaultStatus() {
+  return window['go']['main']['App']['GetVaultStatus']();
+}
+
 export function IsLocked() {
   return window['go']['main']['App']['IsLocked']();
 }
@@ -50,8 +66,16 @@ export function Login(arg1) {
   return window['go']['main']['App']['Login'](arg1);
 }
 
+export function LoginV2(arg1) {
+  return window['go']['main']['App']['LoginV2'](arg1);
+}
+
 export function Logout() {
   return window['go']['main']['App']['Logout']();
+}
+
+export function PrepareV2Migration(arg1, arg2) {
+  return window['go']['main']['App']['PrepareV2Migration'](arg1, arg2);
 }
 
 export function PrepareVaultRecovery(arg1) {
