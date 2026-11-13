@@ -50,7 +50,7 @@ The strict JSON encoding plus these length-delimited AAD encodings avoid ambiguo
 
 ## Key flow and lifetime
 
-1. For each encryption, `crypto/rand.Reader` supplies a fresh 32-byte DEK, a 32-byte Argon2id salt, and separate algorithm-generated nonces for wrapping and payload encryption. `AEADAlgorithm` owns both nonce generation and nonce validation. AES-256-GCM reads 12 random bytes. The reusable RFC 9058 MGM nonce policy generates one block of random bytes and sets the most-significant bit, and rejects a wrong block length or a nonce with that bit clear. This policy is only a nonce helper; Kuznyechik-MGM itself is not implemented.
+1. For each encryption, `crypto/rand.Reader` supplies a fresh 32-byte DEK, a 32-byte Argon2id salt, and separate algorithm-generated nonces for wrapping and payload encryption. `AEADAlgorithm` owns both nonce generation and nonce validation. AES-256-GCM reads 12 random bytes. The reusable RFC 9058 MGM nonce policy generates one block of random bytes and clears the most-significant bit, matching the RFC's `(n-1)`-bit ICN representation in an `n`-bit block; it rejects a wrong block length or a nonce with that bit set. This policy is only a nonce helper; Kuznyechik-MGM itself is not implemented.
 2. Argon2id derives a 32-byte KEK from the master password and fresh salt. The default is time cost 3, 64 MiB, and four lanes. Accepted container bounds are time 2–6, memory 19–256 MiB, and 1–8 threads. The parser enforces these bounds before key derivation.
 3. The KEK wraps the DEK with the selected AEAD and DEK-wrap AAD.
 4. The DEK encrypts one payload with the same AEAD implementation and payload AAD.

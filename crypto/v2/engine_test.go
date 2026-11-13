@@ -157,7 +157,7 @@ func TestAlgorithmSpecificNoncePolicyIsUsed(t *testing.T) {
 	container := decodeTestContainer(t, serialized)
 	for label, encoded := range map[string]string{"wrap": container.WrapNonce, "payload": container.Nonce} {
 		nonce, _ := base64.StdEncoding.DecodeString(encoded)
-		if len(nonce) != 16 || nonce[0]&0x80 == 0 {
+		if len(nonce) != 16 || nonce[0]&0x80 != 0 {
 			t.Fatalf("%s nonce does not satisfy test MGM policy: %x", label, nonce)
 		}
 		if err := algorithm.ValidateNonce(nonce); err != nil {
@@ -167,8 +167,8 @@ func TestAlgorithmSpecificNoncePolicyIsUsed(t *testing.T) {
 	if _, err := engine.Decrypt(testPassword, serialized); err != nil {
 		t.Fatalf("decrypt with algorithm-specific nonce: %v", err)
 	}
-	if err := algorithm.ValidateNonce(make([]byte, 16)); !errors.Is(err, ErrInvalidParameters) {
-		t.Fatalf("nonce with MGM flag clear error = %v", err)
+	if err := algorithm.ValidateNonce(append([]byte{0x80}, make([]byte, 15)...)); !errors.Is(err, ErrInvalidParameters) {
+		t.Fatalf("nonce with MGM high bit set error = %v", err)
 	}
 	if err := algorithm.ValidateNonce(make([]byte, 15)); !errors.Is(err, ErrInvalidParameters) {
 		t.Fatalf("wrong-length MGM nonce error = %v", err)
@@ -177,11 +177,11 @@ func TestAlgorithmSpecificNoncePolicyIsUsed(t *testing.T) {
 
 func TestRFC9058MGMNoncePolicyGenerationAndValidation(t *testing.T) {
 	policy := RFC9058MGMNoncePolicy{BlockSize: 16}
-	nonce, err := policy.GenerateNonce(bytes.NewReader(bytes.Repeat([]byte{0x01}, 16)))
+	nonce, err := policy.GenerateNonce(bytes.NewReader(bytes.Repeat([]byte{0xff}, 16)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nonce) != 16 || nonce[0]&0x80 == 0 {
+	if len(nonce) != 16 || nonce[0] != 0x7f {
 		t.Fatalf("generated MGM nonce has invalid shape: %x", nonce)
 	}
 	if err := policy.ValidateNonce(nonce); err != nil {
@@ -189,6 +189,29 @@ func TestRFC9058MGMNoncePolicyGenerationAndValidation(t *testing.T) {
 	}
 	if _, err := policy.GenerateNonce(bytes.NewReader([]byte{1})); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("short random source error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name  string
+		first byte
+		valid bool
+	}{
+		{name: "lowest allowed", first: 0x00, valid: true},
+		{name: "highest allowed", first: 0x7f, valid: true},
+		{name: "lowest forbidden", first: 0x80, valid: false},
+		{name: "highest forbidden", first: 0xff, valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boundaryNonce := make([]byte, 16)
+			boundaryNonce[0] = test.first
+			err := policy.ValidateNonce(boundaryNonce)
+			if test.valid && err != nil {
+				t.Fatalf("expected nonce to be valid, got %v", err)
+			}
+			if !test.valid && !errors.Is(err, ErrInvalidParameters) {
+				t.Fatalf("expected high-bit nonce rejection, got %v", err)
+			}
+		})
 	}
 }
 

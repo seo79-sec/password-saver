@@ -95,7 +95,8 @@ func (AES256GCM) New(key []byte) (cipher.AEAD, error) {
 }
 
 // RFC9058MGMNoncePolicy implements MGM's nonce shape rules for a provider that
-// implements the mode: exactly one block, with the most significant bit set.
+// implements the mode: exactly one block, with the most significant bit clear
+// because the ICN value occupies only n-1 bits.
 // It does not implement MGM or provide a complete MGM algorithm provider.
 type RFC9058MGMNoncePolicy struct {
 	BlockSize int
@@ -109,12 +110,12 @@ func (p RFC9058MGMNoncePolicy) GenerateNonce(random io.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(random, nonce); err != nil {
 		return nil, err
 	}
-	nonce[0] |= 0x80
+	nonce[0] &= 0x7f
 	return nonce, p.ValidateNonce(nonce)
 }
 
 func (p RFC9058MGMNoncePolicy) ValidateNonce(nonce []byte) error {
-	if p.BlockSize <= 0 || len(nonce) != p.BlockSize || nonce[0]&0x80 == 0 {
+	if p.BlockSize <= 0 || len(nonce) != p.BlockSize || nonce[0]&0x80 != 0 {
 		return fmt.Errorf("%w: invalid RFC 9058 MGM nonce", ErrInvalidParameters)
 	}
 	return nil
