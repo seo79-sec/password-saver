@@ -168,7 +168,10 @@ func (a *App) UpdateAccount(id string, title string, login string, password stri
 }
 
 // ResetVault выполняет экстренный сброс: затирает RAM и удаляет физический файл с диска
-func (a *App) ResetVault() error {
+func (a *App) ResetVault(confirmed bool) error {
+	if !confirmed {
+		return errors.New("сброс хранилища требует подтверждения")
+	}
 	a.Logout()
 	// Reset remains available while locked so a forgotten master password can
 	// still reset the vault. The UI asks for explicit confirmation.

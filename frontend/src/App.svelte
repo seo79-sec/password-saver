@@ -211,7 +211,7 @@
   function handleReset() {
     showConfirm("Сброс хранилища", "ВНИМАНИЕ! Это действие навсегда удалит все зашифрованные пароли.\nВы уверены?", async () => {
       try { 
-        await ResetVault(); 
+        await ResetVault(true);
         errorMessage = ''; lockReason = ''; masterPassword = ''; show2FAInput = false;
         showAlert("Успешно", "Ваше хранилище было полностью сброшено."); 
       } catch (err) { errorMessage = err; }

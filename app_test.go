@@ -53,10 +53,10 @@ func TestMutationFailureRollsBackMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := cloneVault(a.vault)
-	oldRename := renameVaultFile
-	t.Cleanup(func() { renameVaultFile = oldRename })
+	oldRename := replaceVaultFile
+	t.Cleanup(func() { replaceVaultFile = oldRename })
 	failed := false
-	renameVaultFile = func(src, dst string) error {
+	replaceVaultFile = func(src, dst string) error {
 		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && dst == dataFile {
 			failed = true
 			return os.ErrPermission
@@ -82,7 +82,14 @@ func TestResetVaultAvailableWhenMasterPasswordForgotten(t *testing.T) {
 	if err := os.WriteFile(dataFile+".bak", []byte("encrypted backup fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewApp().ResetVault(); err != nil {
+	app := NewApp()
+	if err := app.ResetVault(false); err == nil {
+		t.Fatal("reset without explicit confirmation succeeded")
+	}
+	if _, err := os.Stat(dataFile); err != nil {
+		t.Fatalf("unconfirmed reset removed the vault: %v", err)
+	}
+	if err := app.ResetVault(true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dataFile, dataFile + ".bak"} {

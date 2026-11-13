@@ -10,6 +10,7 @@ import (
 	"os"
 	"password-saver/crypto"
 	"path/filepath"
+	"sync"
 )
 
 // Account — это структура одной записи (одного сохраненного пароля)
@@ -31,7 +32,9 @@ type Vault struct {
 const dataFile = "vault_data.enc" // Имя файла, где всё будет храниться
 const maxVaultFileSize = crypto.CiphertextLimit*4/3 + (1 << 20)
 
-var renameVaultFile = os.Rename
+var replaceVaultFile = replaceFile
+var errVaultCorrupt = errors.New("файл хранилища поврежден")
+var vaultWriteMu sync.Mutex
 
 // Секретный ключ приложения для подписи файла (HMAC)
 // Защищает файл от подмены или изменения сторонними программами
@@ -44,6 +47,8 @@ func SaveVault(cm *crypto.CryptoManager, v *Vault) error {
 }
 
 func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
+	vaultWriteMu.Lock()
+	defer vaultWriteMu.Unlock()
 	// 1. Превращаем структуру Vault в текст (JSON)
 	jsonData, err := json.Marshal(v)
 	if err != nil {
@@ -88,8 +93,7 @@ func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
 }
 
 // writeFileAtomic writes in the destination directory, syncs the data, and
-// replaces the destination. The fallback preserves and restores the old file
-// on platforms where rename cannot replace an existing destination.
+// replaces the destination using the platform's atomic replacement operation.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".vault-write-*")
@@ -113,33 +117,7 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := renameVaultFile(tmpName, path); err == nil {
-		return syncDirectory(dir)
-	}
-
-	// Windows and some filesystems reject rename over an existing file.
-	rollback, err := os.CreateTemp(dir, ".vault-rollback-*")
-	if err != nil {
-		return err
-	}
-	rollbackName := rollback.Name()
-	if err := rollback.Close(); err != nil {
-		os.Remove(rollbackName)
-		return err
-	}
-	if err := os.Remove(rollbackName); err != nil {
-		return err
-	}
-	if err := renameVaultFile(path, rollbackName); err != nil {
-		return err
-	}
-	if err := renameVaultFile(tmpName, path); err != nil {
-		if restoreErr := renameVaultFile(rollbackName, path); restoreErr != nil {
-			return fmt.Errorf("замена не удалась (%v), восстановление не удалось (%w)", err, restoreErr)
-		}
-		return err
-	}
-	if err := os.Remove(rollbackName); err != nil {
+	if err := replaceVaultFile(tmpName, path); err != nil {
 		return err
 	}
 	return syncDirectory(dir)
@@ -158,46 +136,63 @@ func syncDirectory(dir string) error {
 
 // LoadVault читает файл, проверяет целостность по HMAC и расшифровывает пароли
 func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
-	// 1. Читаем файл с диска
-	info, statErr := os.Stat(dataFile)
-	if statErr == nil && info.Size() > maxVaultFileSize {
-		return nil, errors.New("файл поврежден: превышен допустимый размер")
+	v, primaryErr := loadVaultFromPath(cm, dataFile)
+	if primaryErr == nil {
+		return v, nil
 	}
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return nil, statErr
+	if !errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt) {
+		return nil, primaryErr
 	}
-	f, openErr := os.Open(dataFile)
-	if openErr != nil && !errors.Is(openErr, os.ErrNotExist) {
-		return nil, openErr
-	}
-	var fileData []byte
-	var err error
-	if openErr == nil {
-		fileData, err = io.ReadAll(io.LimitReader(f, maxVaultFileSize+1))
-		closeErr := f.Close()
+
+	backupVault, backupErr := loadVaultFromPath(cm, dataFile+".bak")
+	if backupErr == nil {
+		backupData, err := readVaultFile(dataFile + ".bak")
 		if err != nil {
 			return nil, err
 		}
-		if closeErr != nil {
-			return nil, closeErr
+		if err := writeFileAtomic(dataFile, backupData); err != nil {
+			return nil, fmt.Errorf("резервная копия корректна, но восстановить основной файл не удалось: %w", err)
 		}
-		if len(fileData) > maxVaultFileSize {
-			return nil, errors.New("файл поврежден: превышен допустимый размер")
-		}
-	} else {
-		err = openErr
+		return backupVault, nil
 	}
+	if errors.Is(primaryErr, os.ErrNotExist) && errors.Is(backupErr, os.ErrNotExist) {
+		// Первый запуск: оба файла отсутствуют.
+		return &Vault{Accounts: []Account{}}, nil
+	}
+	return nil, errors.Join(primaryErr, fmt.Errorf("резервная копия недоступна: %w", backupErr))
+}
+
+func readVaultFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// Если файла еще нет (первый запуск), возвращаем пустое хранилище
-			return &Vault{Accounts: []Account{}}, nil
-		}
 		return nil, err
 	}
+	if info.Size() > maxVaultFileSize {
+		return nil, errVaultCorrupt
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxVaultFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxVaultFileSize {
+		return nil, errVaultCorrupt
+	}
+	return data, nil
+}
 
+func loadVaultFromPath(cm *crypto.CryptoManager, path string) (*Vault, error) {
+	fileData, err := readVaultFile(path)
+	if err != nil {
+		return nil, err
+	}
 	sigLen := sha256.Size // Размер подписи SHA-256 всегда 32 байта
 	if len(fileData) < sigLen {
-		return nil, errors.New("файл поврежден: слишком маленький размер")
+		return nil, errVaultCorrupt
 	}
 
 	// 2. Разделяем данные и подпись
@@ -211,13 +206,13 @@ func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
 
 	// Безопасное побитовое сравнение подписей (защита от атак по времени)
 	if !hmac.Equal(receivedSignature, expectedSignature) {
-		return nil, errors.New("КРИТИЧЕСКАЯ ОШИБКА: Файл был изменен или поврежден!")
+		return nil, errVaultCorrupt
 	}
 
 	// 4. Распаковываем зашифрованную структуру (теперь мы точно знаем, что payload не изменен)
 	var encryptedData crypto.EncryptedData
 	if err := json.Unmarshal(payload, &encryptedData); err != nil {
-		return nil, errors.New("файл поврежден: неверный формат JSON")
+		return nil, errVaultCorrupt
 	}
 
 	// 5. Расшифровываем
@@ -229,7 +224,7 @@ func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
 	// 6. Превращаем расшифрованный JSON обратно в структуру Vault
 	var v Vault
 	if err := json.Unmarshal([]byte(decryptedJson), &v); err != nil {
-		return nil, err
+		return nil, errVaultCorrupt
 	}
 
 	return &v, nil

@@ -34,8 +34,8 @@ export function Logout() {
   return window['go']['main']['App']['Logout']();
 }
 
-export function ResetVault() {
-  return window['go']['main']['App']['ResetVault']();
+export function ResetVault(arg1) {
+  return window['go']['main']['App']['ResetVault'](arg1);
 }
 
 export function UpdateAccount(arg1, arg2, arg3, arg4) {

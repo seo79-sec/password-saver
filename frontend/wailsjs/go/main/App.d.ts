@@ -18,7 +18,7 @@ export function Login(arg1:string):Promise<boolean>;
 
 export function Logout():Promise<void>;
 
-export function ResetVault():Promise<void>;
+export function ResetVault(arg1:boolean):Promise<void>;
 
 export function UpdateAccount(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 

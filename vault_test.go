@@ -66,6 +66,76 @@ func TestLoadVaultRejectsDamagedAndOversizedFiles(t *testing.T) {
 	}
 }
 
+func TestLoadVaultRestoresBackupWhenPrimaryMissingOrCorrupt(t *testing.T) {
+	for _, primary := range []string{"missing", "corrupt"} {
+		t.Run(primary, func(t *testing.T) {
+			withVaultDir(t)
+			cm, _ := crypto.NewCryptoManager("correct horse battery staple")
+			defer cm.Wipe()
+			want := &Vault{Accounts: []Account{{ID: "from-backup", Password: "secret"}}}
+			if err := SaveVault(cm, want); err != nil {
+				t.Fatal(err)
+			}
+			backup, err := os.ReadFile(dataFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dataFile+".bak", backup, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if primary == "missing" {
+				if err := os.Remove(dataFile); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(dataFile, []byte("truncated"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadVault(cm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(loaded.Accounts) != 1 || loaded.Accounts[0].ID != "from-backup" {
+				t.Fatalf("unexpected recovered vault: %#v", loaded)
+			}
+			restored, err := os.ReadFile(dataFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(restored, backup) {
+				t.Fatal("backup was not restored as the primary container")
+			}
+		})
+	}
+}
+
+func TestWrongPasswordDoesNotRestoreBackupOverPrimary(t *testing.T) {
+	withVaultDir(t)
+	cm, _ := crypto.NewCryptoManager("correct horse battery staple")
+	defer cm.Wipe()
+	if err := SaveVault(cm, &Vault{Accounts: []Account{{ID: "old"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveVault(cm, &Vault{Accounts: []Account{{ID: "current"}}}); err != nil {
+		t.Fatal(err)
+	}
+	primaryBefore, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong, _ := crypto.NewCryptoManager("incorrect horse battery staple")
+	defer wrong.Wipe()
+	if _, err := LoadVault(wrong); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	primaryAfter, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(primaryBefore, primaryAfter) {
+		t.Fatal("wrong password caused backup restoration over a valid primary")
+	}
+}
+
 func TestSaveVaultWriteFailurePreservesPreviousFile(t *testing.T) {
 	dir := withVaultDir(t)
 	cm, _ := crypto.NewCryptoManager("correct horse battery staple")
@@ -79,10 +149,10 @@ func TestSaveVaultWriteFailurePreservesPreviousFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldRename := renameVaultFile
-	defer func() { renameVaultFile = oldRename }()
+	oldRename := replaceVaultFile
+	defer func() { replaceVaultFile = oldRename }()
 	failed := false
-	renameVaultFile = func(src, dst string) error {
+	replaceVaultFile = func(src, dst string) error {
 		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && dst == path {
 			failed = true
 			return os.ErrPermission
