@@ -1,111 +1,62 @@
-# 🔐 PasswordSaver
+# PasswordSaver
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
-![Svelte](https://img.shields.io/badge/Svelte-4.0+-FF3E00?logo=svelte)
-![Wails](https://img.shields.io/badge/Wails-v2-red.svg)
-![Security](https://img.shields.io/badge/Security-AES--GCM-success.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)
+![Go](https://img.shields.io/badge/Go-1.26.4+-00ADD8?logo=go)
+![Svelte](https://img.shields.io/badge/Svelte-3.x-FF3E00?logo=svelte)
+![Wails](https://img.shields.io/badge/Wails-v2.12-red.svg)
 
-> **PasswordSaver** — это современный, быстрый и абсолютно безопасный локальный менеджер паролей. Проект разработан для тех, кто ценит максимальную приватность и хочет полностью контролировать свои цифровые данные без передачи их в облачные хранилища или на сторонние серверы.
+PasswordSaver is a local desktop password manager built with Go, Svelte, and Wails. The encrypted vault uses AES-256-GCM and Argon2id. The 1.1 release keeps the existing `vault_data.enc` format.
 
----
+## Features
 
-## 📑 Оглавление
-1. [О проекте](#-о-проекте)
-2. [Ключевые возможности](#-ключевые-возможности)
-3. [Архитектура и безопасность](#-архитектура-и-безопасность)
-4. [Стек технологий](#-стек-технологий)
-5. [Установка и использование](#-установка-и-использование)
-6. [Сборка из исходного кода](#-сборка-из-исходного-кода)
-7. [Команда разработчиков](#-команда-разработчиков)
+- Encrypted local vault with an encrypted `.bak` backup and an explicit recovery flow.
+- Optional TOTP two-factor authentication.
+- Password generator, categories, search, and password health indicators.
+- Password values are hidden by default and can be copied without displaying them.
+- Configurable idle lock (1, 5, 10, or 15 minutes) and clipboard clearing (15, 30, or 60 seconds).
+- Optional Have I Been Pwned (HIBP) check. The app computes a SHA-1 hash locally and sends only its first five hexadecimal characters to the HIBP range API; it does not send the clear-text password.
+- Service names are not sent to a third-party favicon service.
 
----
+## Storage and privacy
 
-## 💡 О проекте
+The application reads and writes `vault_data.enc` relative to its current working directory. Keep the executable and its working directory in a writable location that you control. On subsequent saves, the previous encrypted vault is kept in `vault_data.enc.bak`. When the primary file is missing or damaged, the app checks the backup and asks before restoring it; a damaged primary is retained for diagnostics.
 
-В эпоху частых утечек данных хранение паролей в браузере или онлайн-сервисах становится всё более рискованным. **PasswordSaver** решает эту проблему, предлагая концепцию *Zero-Knowledge* на локальном уровне. Все ваши аккаунты, логины и секреты шифруются и хранятся исключительно на вашем устройстве в едином файле `vault_data.enc`.
+HIBP checks make a network request when the user explicitly starts a check. Use synthetic credentials when testing this feature. No clear-text password is sent to HIBP.
 
-Проект разработан в рамках учебной практики студентов МТУСИ, но по архитектуре и подходам к безопасности соответствует современным коммерческим решениям.
+The UI drops references to sensitive values when the session locks, but JavaScript and the operating system do not provide a guarantee that every copy has been erased from memory. Clipboard clearing is best effort and depends on operating-system clipboard access.
 
----
+## Build requirements
 
-## ✨ Ключевые возможности
+- Go **1.26.4 or newer**, according to `go.mod`.
+- Node.js **24** and npm (use the version bundled with Node.js; CI runs `npm ci`).
+- Wails CLI **v2.12.0**.
+- For Windows builds from source: Windows 10/11, a supported MinGW-w64 C compiler as required by Wails, and WebView2 tooling/runtime. See the [Wails Windows installation guide](https://wails.io/docs/gettingstarted/installation).
+- For running the packaged Windows app: Microsoft Edge WebView2 Runtime.
 
-* 🔒 **Абсолютная локальность:** Никакой телеметрии, никаких облачных баз данных. Ваши пароли принадлежат только вам.
-* 🛡️ **Двухфакторная аутентификация (2FA):** Встроенная поддержка алгоритма TOTP (Google Authenticator, Яндекс.Ключ) для защиты входа в хранилище.
-* 🔑 **Мощный генератор паролей:** Настраиваемая длина, использование спецсимволов и цифр для создания криптографически стойких паролей.
-* 🚨 **Мониторинг утечек (Pwned Check):** Интеграция с безопасным API *HaveIBeenPwned* (через k-Anonymity) для проверки ваших паролей на предмет участия в известных сливах баз данных.
-* 🗂️ **Умная категоризация:** Удобная сортировка аккаунтов (Работа, Социальные сети, Финансы, Игры) и поиск с мгновенной фильтрацией.
-* ⏳ **Автоматическая блокировка:** Защита от несанкционированного доступа к открытому приложению при простое (AFK).
-* 🌗 **Адаптивный UI:** Современный интерфейс с поддержкой светлой и темной тем, плавными анимациями и отзывчивым дизайном.
+## Build and test
 
----
+```sh
+go test ./...
+go test -race ./...
+go build ./...
 
-## 🔐 Архитектура и безопасность
+cd frontend
+npm ci
+npm test
+npm run build
+cd ..
 
-Мы уделили особое внимание защите данных как в состоянии покоя (Data at Rest), так и в памяти (Data in Use):
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+wails doctor
+wails build -platform windows/amd64 -clean
+```
 
-1. **Шифрование AES-GCM:** Файл хранилища зашифрован алгоритмом симметричного шифрования AES с длиной ключа 256 бит в режиме Galois/Counter Mode. Это обеспечивает не только конфиденциальность, но и аутентичность данных (защиту от подделки файла).
-2. **Безопасная деривация ключей:** Мастер-пароль пользователя никогда не сохраняется в открытом виде. Для получения ключа шифрования используются современные функции формирования ключа с солью.
-3. **Защита оперативной памяти:** Реализована очистка критических переменных памяти (паролей и секретов) после их использования, что усложняет жизнь злоумышленникам при попытках дампа RAM.
-4. **Безопасный буфер обмена:** При копировании пароля через интерфейс приложения, буфер обмена автоматически очищается через заданный промежуток времени.
+The executable is written to `build/bin/password-saver.exe`. The supported release build is Windows x64. For the release-candidate workflow and manual Windows test plan, see [Release preparation](docs/RELEASING.md) and [Windows test plan](docs/WINDOWS_MANUAL_TEST.md).
 
----
+## Install
 
-## 🛠 Стек технологий
+Download `password-saver.exe` from the GitHub Releases page, verify its published SHA-256 checksum, and run it from a writable directory. WebView2 Runtime must be installed. Back up `vault_data.enc` and `vault_data.enc.bak` together before moving or replacing the application files. Never use a real vault for manual or destructive tests.
 
-Проект построен на базе фреймворка **Wails**, который позволяет использовать мощь Go для бэкенда и современные веб-технологии для фронтенда, компилируя всё в единый нативный исполняемый файл.
+## Project
 
-* **Backend:** `Go` (Golang) — обеспечивает высокую скорость криптографических операций и работу с файловой системой.
-* **Frontend:** `Svelte` + `JavaScript` + `CSS3` — легковесный и реактивный UI без использования виртуального DOM.
-* **Связка:** `Wails v2` — мост между Go и JavaScript, обеспечивающий генерацию биндингов и упаковку приложения.
-
----
-
-## 🚀 Установка и использование
-
-Для обычных пользователей, которые хотят просто пользоваться менеджером паролей:
-
-1. Перейдите в раздел [Releases](../../releases) на GitHub.
-2. Скачайте последнюю версию `password-saver.exe`.
-3. Поместите файл в удобную для вас папку (рядом с ним будет создан файл хранилища `vault_data.enc`).
-4. Запустите приложение. При первом запуске вам будет предложено придумать **Мастер-пароль**.
-   > ⚠️ **ВНИМАНИЕ:** Обязательно запомните мастер-пароль! Восстановить зашифрованные данные без него математически невозможно.
-5. Для дополнительной безопасности перейдите в настройки и включите **2FA**.
-
----
-
-## 💻 Сборка из исходного кода
-
-Если вы разработчик и хотите собрать проект самостоятельно или внести изменения:
-
-### Требования:
-* [Go 1.21+](https://golang.org/dl/)
-* [Node.js 18+](https://nodejs.org/en/download/)
-* [Wails CLI](https://wails.io/docs/gettingstarted/installation)
-
-### Шаги установки:
-
-1. Клонируйте репозиторий:
-   ```bash
-   git clone [https://github.com/seo79-sec/password-saver](https://github.com/seo79-sec/password-saver)
-   cd password-saver
-2. Установите зависимости фронтенда:
-   cd frontend
-   npm install
-   cd ..
-3. Запустите в режиме разработчика (с Hot Reloading):
-   wails dev
-4. Скомпилируйте готовый .exe файл для Windows:
-   wails build -clean
-5. Готовый бинарный файл будет находиться в директории build/bin/.
-👥 Команда разработчиков
-Проект разработан студентами МТУСИ в рамках практической работы:
-
-Дрейман А.Э. — Архитектура, криптография, Frontend/Backend интеграция, документация
-
-Лосев И.К. — Разработка UI/UX, логика Svelte, разработка бота телеграм
-
-Егоров С.А. — Тестирование, алгоритмы безопасности, разработка бота ВК
-
-Сделано с ❤️ для безопасного интернета.
+PasswordSaver was created as a student project at MTUSI. See the repository history for contributors and acknowledgements.
