@@ -7,7 +7,7 @@
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
@@ -41,6 +41,9 @@
   let clipboardController;
   let lockPoll;
   let lastActivitySent = 0;
+  const sessionGeneration = createGenerationGuard();
+  const breachGeneration = createGenerationGuard();
+  let breachController;
   
   // --- ЛОГИКА ТЕМЫ ---
   let isDarkMode = true;
@@ -115,30 +118,48 @@
   let breachChecked = false;
   let breachedCount = 0;
 
+  function cancelBreachCheck() {
+    breachGeneration.invalidate();
+    breachController?.abort();
+    breachController = null;
+    isCheckingBreaches = false;
+  }
+
   async function checkBreaches() {
+    cancelBreachCheck();
+    const checkToken = breachGeneration.capture();
+    const sessionToken = sessionGeneration.capture();
+    const controller = new AbortController();
+    breachController = controller;
     isCheckingBreaches = true; breachedCount = 0;
-    let failed = false;
-    for (let acc of accounts) {
-      try {
-        const encoder = new TextEncoder();
-        const data = encoder.encode(acc.password);
-        const hashBuffer = await window.crypto.subtle.digest('SHA-1', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
-        const prefix = hashHex.substring(0, 5); const suffix = hashHex.substring(5);
-        const res = await fetch(`https://api.pwnedpasswords.com/range/${prefix}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        let found = false;
-        for (let line of text.split('\n')) {
-          if (line.split(':')[0] === suffix) { breachedCount++; found = true; acc.isBreached = true; break; }
-        }
-        if (!found) acc.isBreached = false;
-      } catch (e) { console.error(e); failed = true; }
+    try {
+      const result = await checkHIBPPasswords(accounts, {
+        signal: controller.signal,
+        fetchImpl: fetch,
+        digest: bytes => window.crypto.subtle.digest('SHA-1', bytes),
+      });
+      if (!breachGeneration.isCurrent(checkToken) || !sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      const byID = new Map(result.results.map(item => [item.id, item.breached]));
+      accounts = accounts.map(account => {
+        if (byID.has(account.id)) account.isBreached = byID.get(account.id);
+        return account;
+      });
+      breachedCount = result.results.filter(item => item.breached).length;
+      breachChecked = !result.failed;
+      toastMessage = result.failed ? 'Сетевая проверка утечек не завершена. SHA-1 префиксы отправляются в HIBP; открытые пароли не отправляются.' : 'Проверка выполнена через сеть HIBP (отправляется только SHA-1 префикс)';
+      setTimeout(() => toastMessage = '', 4500);
+    } catch (error) {
+      if (error?.name !== 'AbortError' && breachGeneration.isCurrent(checkToken) && sessionGeneration.isCurrent(sessionToken) && isLoggedIn) {
+        console.error(error);
+        toastMessage = 'Не удалось проверить утечки через сеть HIBP';
+        setTimeout(() => toastMessage = '', 4500);
+      }
+    } finally {
+      if (breachGeneration.isCurrent(checkToken)) {
+        isCheckingBreaches = false;
+        breachController = null;
+      }
     }
-    accounts = [...accounts]; isCheckingBreaches = false; breachChecked = !failed;
-    toastMessage = failed ? 'Сетевая проверка утечек не завершена. SHA-1 префиксы отправляются в HIBP; открытые пароли не отправляются.' : 'Проверка выполнена через сеть HIBP (отправляется только SHA-1 префикс)';
-    setTimeout(() => toastMessage = '', 4500);
   }
 
   function handleActivity() {
@@ -148,6 +169,8 @@
   }
 
   function clearSensitiveState(reason = '') {
+    sessionGeneration.invalidate();
+    cancelBreachCheck();
     isLoggedIn = false; accounts = []; masterPassword = ''; newPass = ''; twoFACode = '';
     setupCode = ''; totpSecret = ''; totpQRCode = ''; show2FASetupModal = false;
     show2FAInput = false; visiblePasswordIDs = new Set(); showFormPassword = false;
@@ -180,7 +203,7 @@
     };
     document.addEventListener('visibilitychange', checkOnReturn);
     window.addEventListener('focus', checkOnReturn);
-    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); clipboardController?.cancel(); };
+    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); cancelBreachCheck(); clipboardController?.cancel(); };
   });
 
   let strengthColor = 'transparent';
@@ -218,6 +241,7 @@
         show2FAInput = true;
         errorMessage = '';
       } else {
+        sessionGeneration.advance();
         isLoggedIn = true;
         errorMessage = '';
         lockReason = '';
@@ -232,7 +256,7 @@
             const requires2FA = await ConfirmVaultRecovery(recoveryToken);
             errorMessage = '';
             if (requires2FA) { show2FAInput = true; }
-            else { isLoggedIn = true; masterPassword = ''; loadAccounts(); }
+            else { sessionGeneration.advance(); isLoggedIn = true; masterPassword = ''; loadAccounts(); }
           } catch (recoveryErr) { errorMessage = recoveryErr; }
         }, () => { CancelVaultRecovery(recoveryToken); masterPassword = ''; });
         masterPassword = '';
@@ -243,6 +267,7 @@
   async function handleVerify2FA() {
     try {
       await Verify2FA(twoFACode);
+      sessionGeneration.advance();
       isLoggedIn = true;
       show2FAInput = false;
       twoFACode = '';
@@ -254,7 +279,8 @@
   }
 
   async function handleLogout(reason = '') {
-    try { await Logout(); } finally { clearSensitiveState(reason); }
+    clearSensitiveState(reason);
+    try { await Logout(); } catch (error) { console.error(error); }
   }
 
   async function handleReset() {
@@ -271,7 +297,13 @@
   }
 
   async function loadAccounts() {
-    try { accounts = await GetAccounts() || []; breachChecked = false; breachedCount = 0; } catch (err) { console.error(err); }
+    const token = sessionGeneration.capture();
+    try {
+      await resolveForGeneration(GetAccounts(), sessionGeneration, token, result => {
+        if (!isLoggedIn) return;
+        accounts = result || []; breachChecked = false; breachedCount = 0;
+      });
+    } catch (err) { if (sessionGeneration.isCurrent(token) && isLoggedIn) console.error(err); }
   }
 
   async function handleSave() {
@@ -382,7 +414,7 @@
           <button class="btn-theme" on:click={toggleTheme} title="Переключить тему">{isDarkMode ? '☀️' : '🌙'}</button>
           <button class="btn-about" style="border-color: var(--accent-color); color: var(--accent-color);" on:click={open2FASetup}>🛡️ Настроить 2FA</button>
           <button class="btn-about" on:click={() => showAbout = true}>ℹ️ О проекте</button>
-          <button class="btn-lock" on:click={handleLogout}>🔒 Заблокировать хранилище</button>
+          <button class="btn-lock" on:click={() => handleLogout('Хранилище заблокировано вручную')}>🔒 Заблокировать хранилище</button>
         </div>
       </div>
 
