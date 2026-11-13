@@ -39,6 +39,7 @@ var errVaultCorrupt = errors.New("файл хранилища поврежден
 var errVaultRecoveryAvailable = errors.New("основной файл поврежден или отсутствует; доступна проверенная резервная копия")
 var errVaultCommitUncertain = errors.New("запись файла заменена, но синхронизация каталога не подтверждена")
 var vaultFileMu sync.Mutex
+var recoveryBackupReader = readVaultFile
 
 // Секретный ключ приложения для подписи файла (HMAC)
 // Защищает файл от подмены или изменения сторонними программами
@@ -181,6 +182,10 @@ func loadVaultFromPath(cm *crypto.CryptoManager, path string) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadVaultData(cm, fileData)
+}
+
+func loadVaultData(cm *crypto.CryptoManager, fileData []byte) (*Vault, error) {
 	sigLen := sha256.Size // Размер подписи SHA-256 всегда 32 байта
 	if len(fileData) < sigLen {
 		return nil, errVaultCorrupt

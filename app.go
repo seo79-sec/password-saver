@@ -36,9 +36,12 @@ type recoveryChallenge struct {
 	token   string
 	expires time.Time
 	cm      *crypto.CryptoManager
+	timer   *time.Timer
 }
 
 const challengeLifetime = 2 * time.Minute
+
+var recoveryChallengeLifetime = challengeLifetime
 
 func NewApp() *App {
 	return &App{}
@@ -214,8 +217,10 @@ func (a *App) UpdateAccount(id string, title string, login string, password stri
 	})
 }
 
-// BeginVaultReset starts a short-lived reset challenge. Reset remains
-// available while locked for forgotten passwords, but not from an active session.
+// BeginVaultReset starts a short-lived reset challenge. It guards against an
+// accidental reset, but is not an independent security boundary against code
+// already running in the app process or a process with direct file access.
+// Reset remains available while locked for forgotten passwords.
 func (a *App) BeginVaultReset() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -271,6 +276,7 @@ func (a *App) ResetVault(token string) error {
 func (a *App) PrepareVaultRecovery(password string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.clearPendingRecoveryLocked()
 	if !a.isLockedLocked() {
 		return "", errors.New("восстановление доступно только на экране входа")
 	}
@@ -297,7 +303,15 @@ func (a *App) PrepareVaultRecovery(password string) (string, error) {
 		return "", err
 	}
 	a.clearPendingRecoveryLocked()
-	a.pendingRecover = recoveryChallenge{token: token, expires: time.Now().Add(challengeLifetime), cm: cm}
+	expires := time.Now().Add(recoveryChallengeLifetime)
+	a.pendingRecover = recoveryChallenge{token: token, expires: expires, cm: cm}
+	a.pendingRecover.timer = time.AfterFunc(time.Until(expires), func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if challengeMatches(a.pendingRecover.token, token) && !time.Now().Before(a.pendingRecover.expires) {
+			a.clearPendingRecoveryLocked()
+		}
+	})
 	return token, nil
 }
 
@@ -319,6 +333,12 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 		a.clearPendingRecoveryLocked()
 		return false, errors.New("подтверждение восстановления отсутствует или истекло")
 	}
+	transferred := false
+	defer func() {
+		if !transferred && challengeMatches(a.pendingRecover.token, pending.token) {
+			a.clearPendingRecoveryLocked()
+		}
+	}()
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
 	_, primaryErr := loadVaultFromPath(pending.cm, dataFile)
@@ -326,14 +346,13 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 		a.clearPendingRecoveryLocked()
 		return false, errors.New("основной файл изменился; повторите проверку восстановления")
 	}
-	recovered, err := loadVaultFromPath(pending.cm, dataFile+".bak")
-	if err != nil {
-		a.clearPendingRecoveryLocked()
-		return false, errors.New("резервная копия больше не прошла проверку")
-	}
-	backupData, err := readVaultFile(dataFile + ".bak")
+	backupData, err := recoveryBackupReader(dataFile + ".bak")
 	if err != nil {
 		return false, err
+	}
+	recovered, err := loadVaultData(pending.cm, backupData)
+	if err != nil {
+		return false, errors.New("резервная копия больше не прошла проверку")
 	}
 	archivePath := ""
 	if !errors.Is(primaryErr, os.ErrNotExist) {
@@ -355,7 +374,6 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 	}
 	if err := writeFileAtomic(dataFile, backupData); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
-			a.clearPendingRecoveryLocked()
 			return false, fmt.Errorf("основной файл восстановлен, но синхронизация каталога не подтверждена: %w", err)
 		}
 		if archivePath != "" {
@@ -368,7 +386,11 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 	a.cm = pending.cm
 	a.vault = recovered
 	a.twoFAVerified = !recovered.TwoFAEnabled
+	if a.pendingRecover.timer != nil {
+		a.pendingRecover.timer.Stop()
+	}
 	a.pendingRecover = recoveryChallenge{}
+	transferred = true
 	return recovered.TwoFAEnabled, nil
 }
 
@@ -389,6 +411,9 @@ func challengeValid(expected string, expires time.Time, provided string) bool {
 }
 
 func (a *App) clearPendingRecoveryLocked() {
+	if a.pendingRecover.timer != nil {
+		a.pendingRecover.timer.Stop()
+	}
 	if a.pendingRecover.cm != nil {
 		a.pendingRecover.cm.Wipe()
 	}
