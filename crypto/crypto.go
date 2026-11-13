@@ -23,6 +23,11 @@ type EncryptedData struct {
 	Nonce      string `json:"nonce"`
 }
 
+const (
+	SaltSize        = 32
+	CiphertextLimit = 64 << 20
+)
+
 func NewCryptoManager(masterPassword string) (*CryptoManager, error) {
 	if len(masterPassword) < 12 {
 		return nil, errors.New("мастер-пароль должен быть не менее 12 символов")
@@ -53,11 +58,11 @@ func (cm *CryptoManager) Wipe() {
 }
 
 func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
-	if cm.masterPassword == nil {
+	if cm == nil || len(cm.masterPassword) == 0 {
 		return nil, errors.New("крипто-менеджер уничтожен или сессия закрыта")
 	}
 
-	salt := make([]byte, 32)
+	salt := make([]byte, SaltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
@@ -94,8 +99,14 @@ func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
 }
 
 func (cm *CryptoManager) Decrypt(ed *EncryptedData) (string, error) {
-	if cm.masterPassword == nil {
+	if cm == nil || len(cm.masterPassword) == 0 {
 		return "", errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	if ed == nil {
+		return "", errors.New("поврежденный зашифрованный контейнер")
+	}
+	if len(ed.Salt) > 128 || len(ed.Nonce) > 64 || len(ed.Ciphertext) > (CiphertextLimit*4/3+8) {
+		return "", errors.New("поврежденный контейнер: превышен допустимый размер")
 	}
 
 	salt, err := base64.StdEncoding.DecodeString(ed.Salt)
@@ -111,6 +122,15 @@ func (cm *CryptoManager) Decrypt(ed *EncryptedData) (string, error) {
 	nonce, err := base64.StdEncoding.DecodeString(ed.Nonce)
 	if err != nil {
 		return "", err
+	}
+	if len(salt) != SaltSize {
+		return "", errors.New("поврежденный контейнер: неверная длина salt")
+	}
+	if len(ciphertext) < 16 || len(ciphertext) > CiphertextLimit {
+		return "", errors.New("поврежденный контейнер: неверная длина ciphertext")
+	}
+	if len(nonce) != 12 {
+		return "", errors.New("поврежденный контейнер: неверная длина nonce")
 	}
 
 	key := argon2.IDKey(cm.masterPassword, salt, 3, 128*1024, 4, 32)

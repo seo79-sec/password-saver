@@ -35,6 +35,9 @@ func (a *App) startup(ctx context.Context) {
 // Login проверяет мастер-пароль, верифицирует HMAC целостность и расшифровывает данные
 // Вот тут мы явно указываем, что возвращаем ДВА значения: (bool, error)
 func (a *App) Login(password string) (bool, error) {
+	// A repeated login starts a fresh authentication flow, including after a
+	// previous session had completed the second factor.
+	a.Logout()
 	cm, err := crypto.NewCryptoManager(password)
 	if err != nil {
 		return false, err
@@ -80,7 +83,26 @@ func (a *App) GetAccounts() ([]Account, error) {
 	if a.IsLocked() {
 		return nil, errors.New("хранилище заблокировано")
 	}
-	return a.vault.Accounts, nil
+	return append([]Account(nil), a.vault.Accounts...), nil
+}
+
+func (a *App) updateVault(change func(*Vault)) error {
+	before := cloneVault(a.vault)
+	change(a.vault)
+	if err := SaveVault(a.cm, a.vault); err != nil {
+		a.vault = before
+		return err
+	}
+	return nil
+}
+
+func cloneVault(v *Vault) *Vault {
+	if v == nil {
+		return nil
+	}
+	copy := *v
+	copy.Accounts = append([]Account(nil), v.Accounts...)
+	return &copy
 }
 
 // AddAccount генерирует ID, добавляет новую запись и перезаписывает файл с новой HMAC подписью
@@ -103,10 +125,7 @@ func (a *App) AddAccount(title, login, password string) error {
 		UpdatedAt: time.Now().Unix(), // Метка для отслеживания старых паролей (180 дней)
 	}
 
-	a.vault.Accounts = append(a.vault.Accounts, newAcc)
-
-	// Сохраняем обновленное состояние на диск
-	return SaveVault(a.cm, a.vault)
+	return a.updateVault(func(v *Vault) { v.Accounts = append(v.Accounts, newAcc) })
 }
 
 // DeleteAccount удаляет аккаунт по ID и обновляет файл на диске
@@ -117,8 +136,7 @@ func (a *App) DeleteAccount(id string) error {
 
 	for i, acc := range a.vault.Accounts {
 		if acc.ID == id {
-			a.vault.Accounts = append(a.vault.Accounts[:i], a.vault.Accounts[i+1:]...)
-			return SaveVault(a.cm, a.vault)
+			return a.updateVault(func(v *Vault) { v.Accounts = append(v.Accounts[:i], v.Accounts[i+1:]...) })
 		}
 	}
 	return errors.New("запись не найдена")
@@ -130,35 +148,34 @@ func (a *App) UpdateAccount(id string, title string, login string, password stri
 		return errors.New("хранилище заблокировано")
 	}
 
-	found := false
+	index := -1
 	for i, acc := range a.vault.Accounts {
 		if acc.ID == id {
-			a.vault.Accounts[i].Title = title
-			a.vault.Accounts[i].Login = login
-			a.vault.Accounts[i].Password = password
-			a.vault.Accounts[i].UpdatedAt = time.Now().Unix() // Обновляем таймстемп изменения
-			found = true
+			index = i
 			break
 		}
 	}
 
-	if !found {
+	if index < 0 {
 		return errors.New("запись не найдена")
 	}
-
-	return SaveVault(a.cm, a.vault)
+	return a.updateVault(func(v *Vault) {
+		v.Accounts[index].Title = title
+		v.Accounts[index].Login = login
+		v.Accounts[index].Password = password
+		v.Accounts[index].UpdatedAt = time.Now().Unix()
+	})
 }
 
 // ResetVault выполняет экстренный сброс: затирает RAM и удаляет физический файл с диска
 func (a *App) ResetVault() error {
 	a.Logout()
-
-	err := os.Remove("vault_data.enc")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	// Reset remains available while locked so a forgotten master password can
+	// still reset the vault. The UI asks for explicit confirmation.
+	for _, path := range []string{dataFile, dataFile + ".bak"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-		return err
 	}
 	return nil
 }
@@ -214,11 +231,10 @@ func (a *App) ConfirmAndEnable2FA(secret, code string) error {
 	}
 
 	// Сохраняем настройки в хранилище
-	a.vault.TwoFAEnabled = true
-	a.vault.TwoFASecret = secret
-
-	// Перезаписываем зашифрованный файл с новыми данными
-	return SaveVault(a.cm, a.vault)
+	return a.updateVault(func(v *Vault) {
+		v.TwoFAEnabled = true
+		v.TwoFASecret = secret
+	})
 }
 
 // Verify2FA используется при логине для ввода кода с телефона
@@ -226,6 +242,9 @@ func (a *App) Verify2FA(code string) error {
 	// Если нет крипто-менеджера, значит мастер-пароль еще не вводили
 	if a.cm == nil || a.vault == nil {
 		return errors.New("сначала введите мастер-пароль")
+	}
+	if a.twoFAVerified {
+		return nil
 	}
 
 	if !a.vault.TwoFAEnabled {
