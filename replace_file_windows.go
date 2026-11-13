@@ -15,3 +15,7 @@ func replaceFile(source, destination string) error {
 	}
 	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }
+
+// MoveFileEx with WRITE_THROUGH flushes the replacement on Windows; opening
+// directories for fsync is unsupported by the Windows filesystem API.
+func syncDirectory(string) error { return nil }

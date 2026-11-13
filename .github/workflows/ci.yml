@@ -7,6 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  race-crypto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run crypto tests with the race detector
+        run: go test -race ./crypto
+
   windows:
     runs-on: windows-latest
     steps:

@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"password-saver/crypto"
+	"sync"
 	"time"
 
 	"github.com/pquerna/otp/totp" // НОВОЕ
@@ -16,17 +19,34 @@ import (
 
 // App struct управляет состоянием приложения и сессией в RAM
 type App struct {
-	ctx           context.Context
-	cm            *crypto.CryptoManager
-	vault         *Vault
-	twoFAVerified bool // НОВОЕ: Флаг успешного прохождения 2FA
+	mu             sync.RWMutex
+	ctx            context.Context
+	cm             *crypto.CryptoManager
+	vault          *Vault
+	twoFAVerified  bool // НОВОЕ: Флаг успешного прохождения 2FA
+	pendingReset   resetChallenge
+	pendingRecover recoveryChallenge
 }
+
+type resetChallenge struct {
+	token   string
+	expires time.Time
+}
+type recoveryChallenge struct {
+	token   string
+	expires time.Time
+	cm      *crypto.CryptoManager
+}
+
+const challengeLifetime = 2 * time.Minute
 
 func NewApp() *App {
 	return &App{}
 }
 
 func (a *App) startup(ctx context.Context) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.ctx = ctx
 }
 
@@ -35,9 +55,12 @@ func (a *App) startup(ctx context.Context) {
 // Login проверяет мастер-пароль, верифицирует HMAC целостность и расшифровывает данные
 // Вот тут мы явно указываем, что возвращаем ДВА значения: (bool, error)
 func (a *App) Login(password string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// A repeated login starts a fresh authentication flow, including after a
 	// previous session had completed the second factor.
-	a.Logout()
+	a.logoutLocked()
+	a.clearPendingChallengesLocked()
 	cm, err := crypto.NewCryptoManager(password)
 	if err != nil {
 		return false, err
@@ -61,6 +84,12 @@ func (a *App) Login(password string) (bool, error) {
 
 // Logout надежно блокирует хранилище, стирая конфиденциальные данные из RAM
 func (a *App) Logout() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.logoutLocked()
+}
+
+func (a *App) logoutLocked() {
 	// Исправлена опечатка: используем верное имя поля a.cm
 	if a.cm != nil {
 		a.cm.Wipe() // Принудительно забиваем нулями область RAM с паролем
@@ -68,11 +97,18 @@ func (a *App) Logout() {
 	}
 	a.vault = nil
 	a.twoFAVerified = false // Сбрасываем статус 2FA
+	a.clearPendingChallengesLocked()
 	// Удаляем ссылку на открытые данные аккаунтов, отправляя их под сборщик мусора
 }
 
 // IsLocked проверяет текущий статус блокировки хранилища
 func (a *App) IsLocked() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isLockedLocked()
+}
+
+func (a *App) isLockedLocked() bool {
 	return a.cm == nil || !a.twoFAVerified
 }
 
@@ -80,7 +116,9 @@ func (a *App) IsLocked() bool {
 
 // GetAccounts возвращает расшифрованные записи для отображения во фронтенде
 func (a *App) GetAccounts() ([]Account, error) {
-	if a.IsLocked() {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.isLockedLocked() {
 		return nil, errors.New("хранилище заблокировано")
 	}
 	return append([]Account(nil), a.vault.Accounts...), nil
@@ -90,6 +128,9 @@ func (a *App) updateVault(change func(*Vault)) error {
 	before := cloneVault(a.vault)
 	change(a.vault)
 	if err := SaveVault(a.cm, a.vault); err != nil {
+		if errors.Is(err, errVaultCommitUncertain) {
+			return err
+		}
 		a.vault = before
 		return err
 	}
@@ -107,7 +148,9 @@ func cloneVault(v *Vault) *Vault {
 
 // AddAccount генерирует ID, добавляет новую запись и перезаписывает файл с новой HMAC подписью
 func (a *App) AddAccount(title, login, password string) error {
-	if a.IsLocked() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isLockedLocked() {
 		return errors.New("хранилище заблокировано")
 	}
 
@@ -130,7 +173,9 @@ func (a *App) AddAccount(title, login, password string) error {
 
 // DeleteAccount удаляет аккаунт по ID и обновляет файл на диске
 func (a *App) DeleteAccount(id string) error {
-	if a.IsLocked() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isLockedLocked() {
 		return errors.New("хранилище заблокировано")
 	}
 
@@ -144,7 +189,9 @@ func (a *App) DeleteAccount(id string) error {
 
 // UpdateAccount изменяет поля существующей записи и перезаписывает защищенный контейнер
 func (a *App) UpdateAccount(id string, title string, login string, password string) error {
-	if a.IsLocked() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isLockedLocked() {
 		return errors.New("хранилище заблокировано")
 	}
 
@@ -167,20 +214,190 @@ func (a *App) UpdateAccount(id string, title string, login string, password stri
 	})
 }
 
-// ResetVault выполняет экстренный сброс: затирает RAM и удаляет физический файл с диска
-func (a *App) ResetVault(confirmed bool) error {
-	if !confirmed {
-		return errors.New("сброс хранилища требует подтверждения")
+// BeginVaultReset starts a short-lived reset challenge. Reset remains
+// available while locked for forgotten passwords, but not from an active session.
+func (a *App) BeginVaultReset() (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.isLockedLocked() {
+		return "", errors.New("сначала заблокируйте хранилище")
 	}
-	a.Logout()
-	// Reset remains available while locked so a forgotten master password can
-	// still reset the vault. The UI asks for explicit confirmation.
+	token, err := newChallengeToken()
+	if err != nil {
+		return "", err
+	}
+	a.pendingReset = resetChallenge{token: token, expires: time.Now().Add(challengeLifetime)}
+	return token, nil
+}
+
+func (a *App) CancelVaultReset(token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if challengeMatches(a.pendingReset.token, token) {
+		a.pendingReset = resetChallenge{}
+	}
+}
+
+// ResetVault consumes the one-time challenge created before the UI asks the
+// user to confirm. It does not protect files from another process with direct
+// filesystem access.
+func (a *App) ResetVault(token string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.isLockedLocked() {
+		return errors.New("сначала заблокируйте хранилище")
+	}
+	if !challengeValid(a.pendingReset.token, a.pendingReset.expires, token) {
+		return errors.New("подтверждение сброса отсутствует или истекло")
+	}
+	a.pendingReset = resetChallenge{}
+	vaultFileMu.Lock()
+	defer vaultFileMu.Unlock()
+	a.logoutLocked()
 	for _, path := range []string{dataFile, dataFile + ".bak"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
+	if err := syncVaultDirectory("."); err != nil {
+		return fmt.Errorf("%w: reset removal durability uncertain: %v", errVaultCommitUncertain, err)
+	}
 	return nil
+}
+
+// PrepareVaultRecovery verifies that the main file is missing or damaged and
+// that the backup passes both integrity and password checks. The returned
+// short-lived token is consumed only after explicit UI confirmation.
+func (a *App) PrepareVaultRecovery(password string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.isLockedLocked() {
+		return "", errors.New("восстановление доступно только на экране входа")
+	}
+	cm, err := crypto.NewCryptoManager(password)
+	if err != nil {
+		return "", err
+	}
+	vaultFileMu.Lock()
+	_, primaryErr := loadVaultFromPath(cm, dataFile)
+	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
+		vaultFileMu.Unlock()
+		cm.Wipe()
+		return "", errors.New("основной файл нельзя безопасно восстановить")
+	}
+	_, backupErr := loadVaultFromPath(cm, dataFile+".bak")
+	vaultFileMu.Unlock()
+	if backupErr != nil {
+		cm.Wipe()
+		return "", errors.New("резервная копия не прошла проверку целостности или пароля")
+	}
+	token, err := newChallengeToken()
+	if err != nil {
+		cm.Wipe()
+		return "", err
+	}
+	a.clearPendingRecoveryLocked()
+	a.pendingRecover = recoveryChallenge{token: token, expires: time.Now().Add(challengeLifetime), cm: cm}
+	return token, nil
+}
+
+func (a *App) CancelVaultRecovery(token string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if challengeMatches(a.pendingRecover.token, token) {
+		a.clearPendingRecoveryLocked()
+	}
+}
+
+// ConfirmVaultRecovery archives a damaged primary file and restores only the
+// backup already validated by PrepareVaultRecovery.
+func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pending := a.pendingRecover
+	if !challengeValid(pending.token, pending.expires, token) || pending.cm == nil {
+		a.clearPendingRecoveryLocked()
+		return false, errors.New("подтверждение восстановления отсутствует или истекло")
+	}
+	vaultFileMu.Lock()
+	defer vaultFileMu.Unlock()
+	_, primaryErr := loadVaultFromPath(pending.cm, dataFile)
+	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
+		a.clearPendingRecoveryLocked()
+		return false, errors.New("основной файл изменился; повторите проверку восстановления")
+	}
+	recovered, err := loadVaultFromPath(pending.cm, dataFile+".bak")
+	if err != nil {
+		a.clearPendingRecoveryLocked()
+		return false, errors.New("резервная копия больше не прошла проверку")
+	}
+	backupData, err := readVaultFile(dataFile + ".bak")
+	if err != nil {
+		return false, err
+	}
+	archivePath := ""
+	if !errors.Is(primaryErr, os.ErrNotExist) {
+		archive, err := os.CreateTemp(".", "vault_data.enc.corrupt-*")
+		if err != nil {
+			return false, err
+		}
+		archivePath = archive.Name()
+		if err := archive.Close(); err != nil {
+			os.Remove(archivePath)
+			return false, err
+		}
+		if err := os.Remove(archivePath); err != nil {
+			return false, err
+		}
+		if err := os.Rename(dataFile, archivePath); err != nil {
+			return false, err
+		}
+	}
+	if err := writeFileAtomic(dataFile, backupData); err != nil {
+		if errors.Is(err, errVaultCommitUncertain) {
+			a.clearPendingRecoveryLocked()
+			return false, fmt.Errorf("основной файл восстановлен, но синхронизация каталога не подтверждена: %w", err)
+		}
+		if archivePath != "" {
+			if restoreErr := os.Rename(archivePath, dataFile); restoreErr != nil {
+				return false, fmt.Errorf("restore failed (%v); diagnostic file retained at %s: %w", err, archivePath, restoreErr)
+			}
+		}
+		return false, err
+	}
+	a.cm = pending.cm
+	a.vault = recovered
+	a.twoFAVerified = !recovered.TwoFAEnabled
+	a.pendingRecover = recoveryChallenge{}
+	return recovered.TwoFAEnabled, nil
+}
+
+func newChallengeToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func challengeMatches(expected, provided string) bool {
+	return expected != "" && len(expected) == len(provided) && subtle.ConstantTimeCompare([]byte(expected), []byte(provided)) == 1
+}
+
+func challengeValid(expected string, expires time.Time, provided string) bool {
+	return time.Now().Before(expires) && challengeMatches(expected, provided)
+}
+
+func (a *App) clearPendingRecoveryLocked() {
+	if a.pendingRecover.cm != nil {
+		a.pendingRecover.cm.Wipe()
+	}
+	a.pendingRecover = recoveryChallenge{}
+}
+
+func (a *App) clearPendingChallengesLocked() {
+	a.pendingReset = resetChallenge{}
+	a.clearPendingRecoveryLocked()
 }
 
 // --- ЛОГИКА ДВУХФАКТОРНОЙ АУТЕНТИФИКАЦИИ ---
@@ -193,7 +410,9 @@ type TOTPSetup struct {
 
 // Generate2FA создает новый секретный ключ и рисует QR-код
 func (a *App) Generate2FA() (*TOTPSetup, error) {
-	if a.IsLocked() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isLockedLocked() {
 		return nil, errors.New("хранилище заблокировано")
 	}
 
@@ -223,7 +442,9 @@ func (a *App) Generate2FA() (*TOTPSetup, error) {
 
 // ConfirmAndEnable2FA проверяет первый код с телефона и навсегда включает 2FA
 func (a *App) ConfirmAndEnable2FA(secret, code string) error {
-	if a.IsLocked() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.isLockedLocked() {
 		return errors.New("хранилище заблокировано")
 	}
 
@@ -242,6 +463,8 @@ func (a *App) ConfirmAndEnable2FA(secret, code string) error {
 
 // Verify2FA используется при логине для ввода кода с телефона
 func (a *App) Verify2FA(code string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// Если нет крипто-менеджера, значит мастер-пароль еще не вводили
 	if a.cm == nil || a.vault == nil {
 		return errors.New("сначала введите мастер-пароль")

@@ -3,6 +3,7 @@ package crypto
 import (
 	"encoding/base64"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -67,4 +68,32 @@ func TestDecryptRejectsWrongPasswordAndWipedManager(t *testing.T) {
 	if _, err := cm.Decrypt(ed); err == nil {
 		t.Fatal("wiped manager decrypted data")
 	}
+}
+
+func TestCryptoManagerConcurrentUseAndWipe(t *testing.T) {
+	cm, err := NewCryptoManager("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed, err := cm.Encrypt("shared fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				if encrypted, err := cm.Encrypt("parallel"); err == nil {
+					_, _ = cm.Decrypt(encrypted)
+				}
+				_, _ = cm.Decrypt(ed)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); cm.Wipe() }()
+	wg.Wait()
+	cm.Wipe()
 }

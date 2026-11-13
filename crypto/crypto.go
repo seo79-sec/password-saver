@@ -9,11 +9,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/argon2"
 )
 
 type CryptoManager struct {
+	mu             sync.RWMutex
 	masterPassword []byte // Изменено со string на []byte для возможности затирания в RAM
 }
 
@@ -51,6 +53,11 @@ func ZeroMemory(data []byte) {
 // Wipe гарантированно уничтожает мастер-пароль внутри крипто-менеджера.
 // Этот метод нужно обязательно вызывать при Logout или блокировке приложения.
 func (cm *CryptoManager) Wipe() {
+	if cm == nil {
+		return
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	if cm.masterPassword != nil {
 		ZeroMemory(cm.masterPassword) // Затираем нулями ячейки памяти
 		cm.masterPassword = nil       // Разрываем ссылку
@@ -58,7 +65,12 @@ func (cm *CryptoManager) Wipe() {
 }
 
 func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
-	if cm == nil || len(cm.masterPassword) == 0 {
+	if cm == nil {
+		return nil, errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if len(cm.masterPassword) == 0 {
 		return nil, errors.New("крипто-менеджер уничтожен или сессия закрыта")
 	}
 
@@ -99,7 +111,12 @@ func (cm *CryptoManager) Encrypt(plaintext string) (*EncryptedData, error) {
 }
 
 func (cm *CryptoManager) Decrypt(ed *EncryptedData) (string, error) {
-	if cm == nil || len(cm.masterPassword) == 0 {
+	if cm == nil {
+		return "", errors.New("крипто-менеджер уничтожен или сессия закрыта")
+	}
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if len(cm.masterPassword) == 0 {
 		return "", errors.New("крипто-менеджер уничтожен или сессия закрыта")
 	}
 	if ed == nil {

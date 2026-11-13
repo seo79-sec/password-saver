@@ -33,8 +33,12 @@ const dataFile = "vault_data.enc" // Имя файла, где всё будет
 const maxVaultFileSize = crypto.CiphertextLimit*4/3 + (1 << 20)
 
 var replaceVaultFile = replaceFile
+var syncVaultTempFile = func(f *os.File) error { return f.Sync() }
+var syncVaultDirectory = syncDirectory
 var errVaultCorrupt = errors.New("файл хранилища поврежден")
-var vaultWriteMu sync.Mutex
+var errVaultRecoveryAvailable = errors.New("основной файл поврежден или отсутствует; доступна проверенная резервная копия")
+var errVaultCommitUncertain = errors.New("запись файла заменена, но синхронизация каталога не подтверждена")
+var vaultFileMu sync.Mutex
 
 // Секретный ключ приложения для подписи файла (HMAC)
 // Защищает файл от подмены или изменения сторонними программами
@@ -47,8 +51,8 @@ func SaveVault(cm *crypto.CryptoManager, v *Vault) error {
 }
 
 func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
-	vaultWriteMu.Lock()
-	defer vaultWriteMu.Unlock()
+	vaultFileMu.Lock()
+	defer vaultFileMu.Unlock()
 	// 1. Превращаем структуру Vault в текст (JSON)
 	jsonData, err := json.Marshal(v)
 	if err != nil {
@@ -86,7 +90,7 @@ func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
 	}
 	if len(previous) > 0 {
 		if err := writeFileAtomic(path+".bak", previous); err != nil {
-			return fmt.Errorf("не удалось сохранить резервную копию: %w", err)
+			return fmt.Errorf("не удалось подтвердить сохранение резервной копии; основной файл не менялся: %v", err)
 		}
 	}
 	return writeFileAtomic(path, finalData)
@@ -110,7 +114,7 @@ func writeFileAtomic(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncVaultTempFile(tmp); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -120,22 +124,16 @@ func writeFileAtomic(path string, data []byte) error {
 	if err := replaceVaultFile(tmpName, path); err != nil {
 		return err
 	}
-	return syncDirectory(dir)
-}
-
-func syncDirectory(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return nil
+	if err := syncVaultDirectory(dir); err != nil {
+		return fmt.Errorf("%w: %v", errVaultCommitUncertain, err)
 	}
-	defer f.Close()
-	// Directory syncing is unsupported on some platforms (notably Windows).
-	_ = f.Sync()
 	return nil
 }
 
 // LoadVault читает файл, проверяет целостность по HMAC и расшифровывает пароли
 func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
+	vaultFileMu.Lock()
+	defer vaultFileMu.Unlock()
 	v, primaryErr := loadVaultFromPath(cm, dataFile)
 	if primaryErr == nil {
 		return v, nil
@@ -144,16 +142,9 @@ func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
 		return nil, primaryErr
 	}
 
-	backupVault, backupErr := loadVaultFromPath(cm, dataFile+".bak")
+	_, backupErr := loadVaultFromPath(cm, dataFile+".bak")
 	if backupErr == nil {
-		backupData, err := readVaultFile(dataFile + ".bak")
-		if err != nil {
-			return nil, err
-		}
-		if err := writeFileAtomic(dataFile, backupData); err != nil {
-			return nil, fmt.Errorf("резервная копия корректна, но восстановить основной файл не удалось: %w", err)
-		}
-		return backupVault, nil
+		return nil, errVaultRecoveryAvailable
 	}
 	if errors.Is(primaryErr, os.ErrNotExist) && errors.Is(backupErr, os.ErrNotExist) {
 		// Первый запуск: оба файла отсутствуют.

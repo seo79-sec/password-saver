@@ -4,6 +4,7 @@
   import { flip } from 'svelte/animate';
   import { 
     Login, Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
+    BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA 
   } from '../wailsjs/go/main/App.js';
 
@@ -56,12 +57,12 @@
   }
 
   // Кастомные диалоговые окна
-  let dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null };
+  let dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
 
-  function showAlert(title, message) { dialog = { show: true, type: 'alert', title, message, onConfirm: null }; }
-  function showConfirm(title, message, onConfirmCallback) { dialog = { show: true, type: 'confirm', title, message, onConfirm: onConfirmCallback }; }
-  function closeDialog() { dialog.show = false; }
-  function confirmDialog() { if (dialog.onConfirm) dialog.onConfirm(); closeDialog(); }
+  function showAlert(title, message) { dialog = { show: true, type: 'alert', title, message, onConfirm: null, onCancel: null }; }
+  function showConfirm(title, message, onConfirmCallback, onCancelCallback = null) { dialog = { show: true, type: 'confirm', title, message, onConfirm: onConfirmCallback, onCancel: onCancelCallback }; }
+  function closeDialog() { const cancel = dialog.onCancel; dialog.show = false; if (cancel) cancel(); }
+  function confirmDialog() { const confirm = dialog.onConfirm; dialog.show = false; if (confirm) confirm(); }
 
   const categories = ['Общие', 'Работа', 'Соцсети', 'Игры', 'Финансы'];
   const categoryColors = { 'Общие': '#8b949e', 'Работа': '#58a6ff', 'Соцсети': '#3fb950', 'Игры': '#e3b341', 'Финансы': '#f85149' };
@@ -185,7 +186,19 @@
         masterPassword = '';
         loadAccounts();      
       }
-    } catch (err) { errorMessage = err; }
+    } catch (err) {
+      try {
+        const recoveryToken = await PrepareVaultRecovery(masterPassword);
+        showConfirm("Восстановить резервную копию?", "Основной файл повреждён или отсутствует. Резервная копия проверена этим мастер-паролем. Текущий повреждённый файл будет сохранён рядом для диагностики, затем данные будут восстановлены из копии.", async () => {
+          try {
+            const requires2FA = await ConfirmVaultRecovery(recoveryToken);
+            errorMessage = '';
+            if (requires2FA) { show2FAInput = true; }
+            else { isLoggedIn = true; masterPassword = ''; loadAccounts(); }
+          } catch (recoveryErr) { errorMessage = recoveryErr; }
+        }, () => CancelVaultRecovery(recoveryToken));
+      } catch { errorMessage = err; }
+    }
   }
 
   async function handleVerify2FA() {
@@ -208,14 +221,17 @@
     cancelEdit(); showAbout = false;
   }
 
-  function handleReset() {
-    showConfirm("Сброс хранилища", "ВНИМАНИЕ! Это действие навсегда удалит все зашифрованные пароли.\nВы уверены?", async () => {
-      try { 
-        await ResetVault(true);
-        errorMessage = ''; lockReason = ''; masterPassword = ''; show2FAInput = false;
-        showAlert("Успешно", "Ваше хранилище было полностью сброшено."); 
-      } catch (err) { errorMessage = err; }
-    });
+  async function handleReset() {
+    try {
+      const resetToken = await BeginVaultReset();
+      showConfirm("Сброс хранилища", "ВНИМАНИЕ! Это действие навсегда удалит все зашифрованные пароли и резервную копию.\nВы уверены?", async () => {
+        try {
+          await ResetVault(resetToken);
+          errorMessage = ''; lockReason = ''; masterPassword = ''; show2FAInput = false;
+          showAlert("Успешно", "Ваше хранилище было полностью сброшено.");
+        } catch (err) { errorMessage = err; }
+      }, () => CancelVaultReset(resetToken));
+    } catch (err) { errorMessage = err; }
   }
 
   async function loadAccounts() {
