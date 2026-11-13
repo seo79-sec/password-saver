@@ -58,6 +58,8 @@ type AEADAlgorithm interface {
 	KeySize() int
 	NonceSize() int
 	TagSize() int
+	GenerateNonce(random io.Reader) ([]byte, error)
+	ValidateNonce(nonce []byte) error
 	New(key []byte) (cipher.AEAD, error)
 }
 
@@ -68,6 +70,19 @@ func (AES256GCM) ID() string     { return AEADAES256GCM }
 func (AES256GCM) KeySize() int   { return DEKSize }
 func (AES256GCM) NonceSize() int { return 12 }
 func (AES256GCM) TagSize() int   { return 16 }
+func (a AES256GCM) GenerateNonce(random io.Reader) ([]byte, error) {
+	nonce := make([]byte, a.NonceSize())
+	if _, err := io.ReadFull(random, nonce); err != nil {
+		return nil, err
+	}
+	return nonce, a.ValidateNonce(nonce)
+}
+func (a AES256GCM) ValidateNonce(nonce []byte) error {
+	if len(nonce) != a.NonceSize() {
+		return fmt.Errorf("%w: AES-256-GCM nonce must be 12 bytes", ErrInvalidParameters)
+	}
+	return nil
+}
 func (AES256GCM) New(key []byte) (cipher.AEAD, error) {
 	if len(key) != DEKSize {
 		return nil, fmt.Errorf("%w: AES-256-GCM requires a 32-byte key", ErrInvalidParameters)
@@ -77,6 +92,32 @@ func (AES256GCM) New(key []byte) (cipher.AEAD, error) {
 		return nil, err
 	}
 	return cipher.NewGCM(block)
+}
+
+// RFC9058MGMNoncePolicy implements MGM's nonce shape rules for a provider that
+// implements the mode: exactly one block, with the most significant bit set.
+// It does not implement MGM or provide a complete MGM algorithm provider.
+type RFC9058MGMNoncePolicy struct {
+	BlockSize int
+}
+
+func (p RFC9058MGMNoncePolicy) GenerateNonce(random io.Reader) ([]byte, error) {
+	if p.BlockSize <= 0 {
+		return nil, ErrInvalidParameters
+	}
+	nonce := make([]byte, p.BlockSize)
+	if _, err := io.ReadFull(random, nonce); err != nil {
+		return nil, err
+	}
+	nonce[0] |= 0x80
+	return nonce, p.ValidateNonce(nonce)
+}
+
+func (p RFC9058MGMNoncePolicy) ValidateNonce(nonce []byte) error {
+	if p.BlockSize <= 0 || len(nonce) != p.BlockSize || nonce[0]&0x80 == 0 {
+		return fmt.Errorf("%w: invalid RFC 9058 MGM nonce", ErrInvalidParameters)
+	}
+	return nil
 }
 
 // KDFConfig selects resource-bounded Argon2id parameters for new containers.
@@ -182,13 +223,21 @@ func (e *Engine) Encrypt(masterPassword string, plaintext []byte) ([]byte, error
 
 	salt := make([]byte, SaltSize)
 	dek := make([]byte, DEKSize)
-	wrapNonce := make([]byte, algorithm.NonceSize())
-	nonce := make([]byte, algorithm.NonceSize())
-	for _, value := range [][]byte{salt, dek, wrapNonce, nonce} {
+	for _, value := range [][]byte{salt, dek} {
 		if err := e.randomBytes(value); err != nil {
 			wipe(dek)
 			return nil, fmt.Errorf("secure random generation failed: %w", err)
 		}
+	}
+	wrapNonce, err := e.generateNonce(algorithm)
+	if err != nil {
+		wipe(dek)
+		return nil, fmt.Errorf("secure random generation failed: %w", err)
+	}
+	nonce, err := e.generateNonce(algorithm)
+	if err != nil {
+		wipe(dek)
+		return nil, fmt.Errorf("secure random generation failed: %w", err)
 	}
 	defer wipe(dek)
 
@@ -215,7 +264,7 @@ func (e *Engine) Encrypt(masterPassword string, plaintext []byte) ([]byte, error
 	metadata.WrapNonce = base64.StdEncoding.EncodeToString(wrapNonce)
 	metadata.WrappedDEK = base64.StdEncoding.EncodeToString(wrappedDEK)
 	metadata.Nonce = base64.StdEncoding.EncodeToString(nonce)
-	payloadAAD := makePayloadAAD(metadata, salt, wrapNonce, wrappedDEK, nonce)
+	payloadAAD := makePayloadAAD(metadata, nonce)
 	ciphertext, err := sealAEAD(algorithm, dek, nonce, plaintext, payloadAAD)
 	if err != nil {
 		return nil, err
@@ -243,68 +292,146 @@ func (e *Engine) Decrypt(masterPassword string, serialized []byte) ([]byte, erro
 	if len(masterPassword) < 12 {
 		return nil, ErrPasswordTooShort
 	}
-	container, err := parseContainer(serialized)
+	opened, err := e.openContainer(masterPassword, serialized)
 	if err != nil {
 		return nil, err
 	}
+	wipe(opened.dek)
+	return opened.plaintext, nil
+}
+
+// ChangeMasterPassword authenticates the complete current container, then
+// rewraps its existing DEK with a new Argon2id salt and KEK. Payload ciphertext
+// and nonce are preserved byte-for-byte. It does not write files.
+func (e *Engine) ChangeMasterPassword(serialized []byte, currentPassword, newPassword string) ([]byte, error) {
+	if e == nil {
+		return nil, ErrInvalidParameters
+	}
+	if len(newPassword) < 12 {
+		return nil, ErrPasswordTooShort
+	}
+	opened, err := e.openContainer(currentPassword, serialized)
+	if err != nil {
+		return nil, err
+	}
+	defer wipe(opened.dek)
+	wipe(opened.plaintext)
+
+	algorithm := e.algorithms[opened.container.AEAD]
+	if algorithm == nil {
+		return nil, ErrUnsupportedAlgorithm
+	}
+	salt := make([]byte, SaltSize)
+	if err := e.randomBytes(salt); err != nil {
+		return nil, fmt.Errorf("secure random generation failed: %w", err)
+	}
+	wrapNonce, err := e.generateNonce(algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("secure random generation failed: %w", err)
+	}
+	passwordBytes := []byte(newPassword)
+	defer wipe(passwordBytes)
+	kdfConfig := KDFConfig{Time: opened.container.KDF.Time, MemoryKiB: opened.container.KDF.MemoryKiB, Threads: opened.container.KDF.Threads}
+	kek := deriveKEK(passwordBytes, salt, kdfConfig)
+	defer wipe(kek)
+
+	rotated := opened.container
+	rotated.KDF.Salt = base64.StdEncoding.EncodeToString(salt)
+	rotated.WrapNonce = base64.StdEncoding.EncodeToString(wrapNonce)
+	wrapAAD := makeWrapAAD(rotated, salt, wrapNonce)
+	wrappedDEK, err := sealAEAD(algorithm, kek, wrapNonce, opened.dek, wrapAAD)
+	if err != nil {
+		return nil, err
+	}
+	rotated.WrappedDEK = base64.StdEncoding.EncodeToString(wrappedDEK)
+	result, err := json.Marshal(rotated)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) > MaxContainerSize {
+		return nil, ErrInputTooLarge
+	}
+	return result, nil
+}
+
+type openedContainer struct {
+	container Container
+	dek       []byte
+	plaintext []byte
+}
+
+func (e *Engine) openContainer(masterPassword string, serialized []byte) (openedContainer, error) {
+	var opened openedContainer
+	if len(serialized) > MaxContainerSize {
+		return opened, ErrInputTooLarge
+	}
+	if len(masterPassword) < 12 {
+		return opened, ErrPasswordTooShort
+	}
+	container, err := parseContainer(serialized)
+	if err != nil {
+		return opened, err
+	}
 	if container.Format != FormatID || container.Version != FormatVersion {
-		return nil, ErrUnsupportedFormat
+		return opened, ErrUnsupportedFormat
 	}
 	if container.KDF.ID != KDFArgon2id || container.KDF.Version != Argon2idVersion {
-		return nil, ErrUnsupportedFormat
+		return opened, ErrUnsupportedFormat
 	}
-	if err := validateKDFConfig(KDFConfig{Time: container.KDF.Time, MemoryKiB: container.KDF.MemoryKiB, Threads: container.KDF.Threads}); err != nil {
-		return nil, err
+	kdfConfig := KDFConfig{Time: container.KDF.Time, MemoryKiB: container.KDF.MemoryKiB, Threads: container.KDF.Threads}
+	if err := validateKDFConfig(kdfConfig); err != nil {
+		return opened, err
 	}
 	algorithm := e.algorithms[container.AEAD]
 	if algorithm == nil {
-		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, container.AEAD)
+		return opened, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, container.AEAD)
 	}
 	if algorithm.KeySize() != DEKSize || algorithm.NonceSize() <= 0 || algorithm.TagSize() <= 0 {
-		return nil, ErrInvalidParameters
+		return opened, ErrInvalidParameters
 	}
 	salt, err := decodeCanonicalBase64(container.KDF.Salt, SaltSize)
 	if err != nil || len(salt) != SaltSize {
-		return nil, ErrInvalidContainer
+		return opened, ErrInvalidContainer
 	}
 	wrapNonce, err := decodeCanonicalBase64(container.WrapNonce, algorithm.NonceSize())
-	if err != nil || len(wrapNonce) != algorithm.NonceSize() {
-		return nil, ErrInvalidContainer
+	if err != nil || algorithm.ValidateNonce(wrapNonce) != nil {
+		return opened, ErrInvalidContainer
 	}
 	nonce, err := decodeCanonicalBase64(container.Nonce, algorithm.NonceSize())
-	if err != nil || len(nonce) != algorithm.NonceSize() {
-		return nil, ErrInvalidContainer
+	if err != nil || algorithm.ValidateNonce(nonce) != nil {
+		return opened, ErrInvalidContainer
 	}
 	wrappedDEK, err := decodeCanonicalBase64(container.WrappedDEK, DEKSize+algorithm.TagSize())
 	if err != nil || len(wrappedDEK) != DEKSize+algorithm.TagSize() {
-		return nil, ErrInvalidContainer
+		return opened, ErrInvalidContainer
 	}
 	maxCiphertext := MaxPlaintextSize + algorithm.TagSize()
 	ciphertext, err := decodeCanonicalBase64(container.Ciphertext, maxCiphertext)
 	if err != nil || len(ciphertext) < algorithm.TagSize() || len(ciphertext) > maxCiphertext {
-		return nil, ErrInvalidContainer
+		return opened, ErrInvalidContainer
 	}
 
 	passwordBytes := []byte(masterPassword)
 	defer wipe(passwordBytes)
-	kek := deriveKEK(passwordBytes, salt, KDFConfig{Time: container.KDF.Time, MemoryKiB: container.KDF.MemoryKiB, Threads: container.KDF.Threads})
+	kek := deriveKEK(passwordBytes, salt, kdfConfig)
 	defer wipe(kek)
 	dek, err := openAEAD(algorithm, kek, wrapNonce, wrappedDEK, makeWrapAAD(container, salt, wrapNonce))
 	if err != nil || len(dek) != DEKSize {
 		wipe(dek)
-		return nil, ErrAuthentication
+		return opened, ErrAuthentication
 	}
-	defer wipe(dek)
-	plaintext, err := openAEAD(algorithm, dek, nonce, ciphertext, makePayloadAAD(container, salt, wrapNonce, wrappedDEK, nonce))
+	plaintext, err := openAEAD(algorithm, dek, nonce, ciphertext, makePayloadAAD(container, nonce))
 	if err != nil {
+		wipe(dek)
 		wipe(plaintext)
-		return nil, ErrAuthentication
+		return opened, ErrAuthentication
 	}
 	if len(plaintext) > MaxPlaintextSize {
+		wipe(dek)
 		wipe(plaintext)
-		return nil, ErrInputTooLarge
+		return opened, ErrInputTooLarge
 	}
-	return plaintext, nil
+	return openedContainer{container: container, dek: dek, plaintext: plaintext}, nil
 }
 
 func parseContainer(serialized []byte) (Container, error) {
@@ -345,10 +472,27 @@ func deriveKEK(password, salt []byte, config KDFConfig) []byte {
 }
 
 func (e *Engine) randomBytes(destination []byte) error {
-	e.randomMu.Lock()
-	defer e.randomMu.Unlock()
-	_, err := io.ReadFull(e.random, destination)
+	_, err := io.ReadFull(engineRandomReader{engine: e}, destination)
 	return err
+}
+
+func (e *Engine) generateNonce(algorithm AEADAlgorithm) ([]byte, error) {
+	nonce, err := algorithm.GenerateNonce(engineRandomReader{engine: e})
+	if err != nil {
+		return nil, err
+	}
+	if len(nonce) != algorithm.NonceSize() || algorithm.ValidateNonce(nonce) != nil {
+		return nil, ErrInvalidParameters
+	}
+	return nonce, nil
+}
+
+type engineRandomReader struct{ engine *Engine }
+
+func (r engineRandomReader) Read(buffer []byte) (int, error) {
+	r.engine.randomMu.Lock()
+	defer r.engine.randomMu.Unlock()
+	return r.engine.random.Read(buffer)
 }
 
 func sealAEAD(algorithm AEADAlgorithm, key, nonce, plaintext, aad []byte) ([]byte, error) {
@@ -395,11 +539,12 @@ func makeWrapAAD(container Container, salt, wrapNonce []byte) []byte {
 	return buffer.Bytes()
 }
 
-func makePayloadAAD(container Container, salt, wrapNonce, wrappedDEK, nonce []byte) []byte {
+func makePayloadAAD(container Container, nonce []byte) []byte {
 	var buffer bytes.Buffer
 	buffer.WriteString("PasswordSaver/v2/PAYLOAD\x00")
-	writeField(&buffer, makeWrapAAD(container, salt, wrapNonce))
-	writeField(&buffer, wrappedDEK)
+	writeField(&buffer, []byte(container.Format))
+	_ = binary.Write(&buffer, binary.BigEndian, container.Version)
+	writeField(&buffer, []byte(container.AEAD))
 	writeField(&buffer, nonce)
 	return buffer.Bytes()
 }
