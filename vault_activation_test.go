@@ -558,3 +558,83 @@ func TestPrepareTokenFailurePreservesV1Management(t *testing.T) {
 	}
 	app.CancelVaultRecovery(recoveryToken)
 }
+
+func TestSelectorConsumersRejectContradictoryCanonicalRecords(t *testing.T) {
+	hash := func(char byte) string { return string(bytes.Repeat([]byte{char}, 64)) }
+	validHash := hash('a')
+	invalidStates := []struct {
+		name   string
+		record vaultSelectorRecord
+	}{
+		{
+			name:   "v1-only-with-preparation-source",
+			record: vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1, SourceV1SHA256: validHash},
+		},
+		{
+			name:   "v1-only-with-activation-hash",
+			record: vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1, ActivatedV2SHA256: validHash},
+		},
+		{
+			name: "prepared-with-activation-hash",
+			record: vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorPreparedV2,
+				SourceV1SHA256: validHash, PreparedV2SHA256: hash('b'), ActivatedV2SHA256: hash('c')},
+		},
+		{
+			name: "prepared-with-malformed-hash",
+			record: vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorPreparedV2,
+				SourceV1SHA256: validHash, PreparedV2SHA256: "not-a-sha256"},
+		},
+		{
+			name:   "active-v2-without-source-hash",
+			record: vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV2, ActivatedV2SHA256: validHash},
+		},
+	}
+
+	for _, tc := range invalidStates {
+		t.Run(tc.name, func(t *testing.T) {
+			vault := syntheticMigrationVault()
+			engine, _, _, _ := createV1AndPreparedV2(t, vault)
+			service, activationToken := prepareActivation(t, engine, vault)
+			cancelToken, err := service.BeginCancelV2Preparation(".")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			selector, err := json.Marshal(tc.record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(vaultSelectorFile, selector, 0600); err != nil {
+				t.Fatal(err)
+			}
+			beforeV1, _ := os.ReadFile(dataFile)
+			beforeV1Backup, _ := os.ReadFile(dataFile + ".bak")
+			beforeV2, _ := os.ReadFile(dataFileV2)
+			beforeSelector, _ := os.ReadFile(vaultSelectorFile)
+
+			if _, err := ResolveVaultSelection("."); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+				t.Fatalf("resolver accepted contradictory selector: %v", err)
+			}
+			if _, err := service.Prepare(".", migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+				t.Fatalf("Prepare accepted contradictory selector: %v", err)
+			}
+			if err := service.Confirm(activationToken, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+				t.Fatalf("Confirm accepted contradictory selector: %v", err)
+			}
+			if _, err := service.BeginCancelV2Preparation("."); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+				t.Fatalf("BeginCancel accepted contradictory selector: %v", err)
+			}
+			if err := service.ConfirmCancelV2Preparation(cancelToken); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+				t.Fatalf("ConfirmCancel accepted contradictory selector: %v", err)
+			}
+
+			afterV1, _ := os.ReadFile(dataFile)
+			afterV1Backup, _ := os.ReadFile(dataFile + ".bak")
+			afterV2, _ := os.ReadFile(dataFileV2)
+			afterSelector, _ := os.ReadFile(vaultSelectorFile)
+			if !bytes.Equal(beforeV1, afterV1) || !bytes.Equal(beforeV1Backup, afterV1Backup) || !bytes.Equal(beforeV2, afterV2) || !bytes.Equal(beforeSelector, afterSelector) {
+				t.Fatal("selector operation changed storage after rejecting contradictory state")
+			}
+		})
+	}
+}

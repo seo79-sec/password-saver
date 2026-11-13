@@ -60,6 +60,31 @@ type vaultSelection struct {
 	NeedsV1Record bool
 }
 
+// validateVaultSelectorRecord enforces one consistent schema for every
+// selector consumer. Fields from one state may never be carried into another.
+func validateVaultSelectorRecord(record vaultSelectorRecord) error {
+	if record.Format != "passwordsaver-vault-selector" || record.Version != 1 {
+		return ErrVaultSelectionAmbiguous
+	}
+	switch record.Mode {
+	case selectorActiveV1:
+		if record.SourceV1SHA256 != "" || record.PreparedV2SHA256 != "" || record.ActivatedV2SHA256 != "" {
+			return ErrVaultSelectionAmbiguous
+		}
+	case selectorPreparedV2:
+		if !validSHA256Hex(record.SourceV1SHA256) || !validSHA256Hex(record.PreparedV2SHA256) || record.ActivatedV2SHA256 != "" {
+			return ErrVaultSelectionAmbiguous
+		}
+	case selectorActiveV2:
+		if !validSHA256Hex(record.SourceV1SHA256) || record.PreparedV2SHA256 != "" || !validSHA256Hex(record.ActivatedV2SHA256) {
+			return ErrVaultSelectionAmbiguous
+		}
+	default:
+		return ErrVaultSelectionAmbiguous
+	}
+	return nil
+}
+
 // ResolveVaultSelection returns only an unambiguous selection. Missing state
 // is accepted as legacy v1 only when no v2 file exists; it can never silently
 // downgrade a directory that contains a v2 container.
@@ -85,19 +110,16 @@ func resolveVaultSelectionLocked(directory string) (vaultSelection, error) {
 	if err != nil {
 		return vaultSelection{}, ErrVaultSelectionAmbiguous
 	}
+	if err := validateVaultSelectorRecord(record); err != nil {
+		return vaultSelection{}, err
+	}
 	switch record.Mode {
 	case selectorActiveV1:
-		if record.SourceV1SHA256 != "" || record.PreparedV2SHA256 != "" || record.ActivatedV2SHA256 != "" {
-			return vaultSelection{}, ErrVaultSelectionAmbiguous
-		}
 		return vaultSelection{Fresh: true}, nil
 	case selectorPreparedV2:
-		if record.ActivatedV2SHA256 != "" {
-			return vaultSelection{}, ErrVaultSelectionAmbiguous
-		}
 		v1Exists, v1StatErr := pathExists(paths.v1)
 		v2Exists, v2StatErr := pathExists(paths.v2)
-		if v1StatErr != nil || v2StatErr != nil || !v1Exists || !v2Exists || !validSHA256Hex(record.SourceV1SHA256) || !validSHA256Hex(record.PreparedV2SHA256) {
+		if v1StatErr != nil || v2StatErr != nil || !v1Exists || !v2Exists {
 			return vaultSelection{}, ErrVaultSelectionAmbiguous
 		}
 		source, sourceErr := readVaultFile(paths.v1)
@@ -106,7 +128,7 @@ func resolveVaultSelectionLocked(directory string) (vaultSelection, error) {
 		return vaultSelection{Prepared: true, Fresh: fresh}, nil
 	case selectorActiveV2:
 		v2Exists, statErr := pathExists(paths.v2)
-		if statErr != nil || !v2Exists || !validSHA256Hex(record.ActivatedV2SHA256) || record.PreparedV2SHA256 != "" {
+		if statErr != nil || !v2Exists {
 			return vaultSelection{}, ErrVaultSelectionAmbiguous
 		}
 		return vaultSelection{ActiveV2: true, Fresh: true}, nil
@@ -166,6 +188,9 @@ func readVaultSelector(path string) (vaultSelectorRecord, error) {
 }
 
 func writeVaultSelector(path string, record vaultSelectorRecord) error {
+	if err := validateVaultSelectorRecord(record); err != nil {
+		return err
+	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -235,6 +260,9 @@ func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string
 
 	selectorWasMissing := false
 	if record, err := readVaultSelector(paths.selector); err == nil {
+		if err := validateVaultSelectorRecord(record); err != nil {
+			return "", err
+		}
 		switch record.Mode {
 		case selectorActiveV2:
 			return "", ErrVaultV2NotActive
@@ -330,11 +358,15 @@ func (s *v2ActivationService) BeginCancelV2Preparation(directory string) (string
 		}
 		return "", ErrVaultSelectionAmbiguous
 	}
+	if err := validateVaultSelectorRecord(record); err != nil {
+		vaultActivationMu.Unlock()
+		return "", err
+	}
 	if record.Mode == selectorActiveV2 {
 		vaultActivationMu.Unlock()
 		return "", ErrVaultV2Protected
 	}
-	if !validPreparedSelector(record) {
+	if record.Mode != selectorPreparedV2 {
 		vaultActivationMu.Unlock()
 		return "", ErrVaultV2CancelDenied
 	}
@@ -381,21 +413,19 @@ func (s *v2ActivationService) ConfirmCancelV2Preparation(token string) error {
 		}
 		return ErrVaultSelectionAmbiguous
 	}
+	if err := validateVaultSelectorRecord(record); err != nil {
+		return err
+	}
 	if record.Mode == selectorActiveV2 {
 		return ErrVaultV2Protected
 	}
-	if !validPreparedSelector(record) || preparedSelectorIdentity(record) != pending.record {
+	if record.Mode != selectorPreparedV2 || preparedSelectorIdentity(record) != pending.record {
 		return ErrVaultV2StalePreparation
 	}
 	v1Only := vaultSelectorRecord{
 		Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1,
 	}
 	return writeVaultSelector(pending.paths.selector, v1Only)
-}
-
-func validPreparedSelector(record vaultSelectorRecord) bool {
-	return record.Mode == selectorPreparedV2 && record.ActivatedV2SHA256 == "" &&
-		validSHA256Hex(record.SourceV1SHA256) && validSHA256Hex(record.PreparedV2SHA256)
 }
 
 func preparedSelectorIdentity(record vaultSelectorRecord) string {
@@ -448,7 +478,16 @@ func (s *v2ActivationService) Confirm(token, masterPassword, totpCode string, en
 	defer v2VaultFileMu.Unlock()
 
 	record, err := readVaultSelector(pending.paths.selector)
-	if err != nil || record.Mode != selectorPreparedV2 || record.SourceV1SHA256 != pending.sourceID || record.PreparedV2SHA256 != pending.v2ID {
+	if err != nil {
+		if errors.Is(err, ErrVaultSelectionAmbiguous) {
+			return ErrVaultSelectionAmbiguous
+		}
+		return ErrVaultV2StalePreparation
+	}
+	if err := validateVaultSelectorRecord(record); err != nil {
+		return err
+	}
+	if record.Mode != selectorPreparedV2 || record.SourceV1SHA256 != pending.sourceID || record.PreparedV2SHA256 != pending.v2ID {
 		return ErrVaultV2StalePreparation
 	}
 	v1Bytes, err := readVaultFile(pending.paths.v1)
