@@ -4,7 +4,17 @@ import {main} from '../models';
 
 export function AddAccount(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function BeginVaultReset():Promise<string>;
+
+export function CancelVaultRecovery(arg1:string):Promise<void>;
+
+export function CancelVaultReset(arg1:string):Promise<void>;
+
+export function CheckInactivity():Promise<boolean>;
+
 export function ConfirmAndEnable2FA(arg1:string,arg2:string):Promise<void>;
+
+export function ConfirmVaultRecovery(arg1:string):Promise<boolean>;
 
 export function DeleteAccount(arg1:string):Promise<void>;
 
@@ -18,17 +28,13 @@ export function Login(arg1:string):Promise<boolean>;
 
 export function Logout():Promise<void>;
 
-export function BeginVaultReset():Promise<string>;
-
-export function CancelVaultReset(arg1:string):Promise<void>;
+export function PrepareVaultRecovery(arg1:string):Promise<string>;
 
 export function ResetVault(arg1:string):Promise<void>;
 
-export function PrepareVaultRecovery(arg1:string):Promise<string>;
+export function SetIdleTimeout(arg1:number):Promise<void>;
 
-export function ConfirmVaultRecovery(arg1:string):Promise<boolean>;
-
-export function CancelVaultRecovery(arg1:string):Promise<void>;
+export function TouchActivity():Promise<void>;
 
 export function UpdateAccount(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
