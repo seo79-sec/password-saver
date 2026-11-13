@@ -378,3 +378,183 @@ func TestActiveV2MissingFileNeverFallsBackToV1(t *testing.T) {
 		t.Fatalf("backend unlock of missing v2 file error = %v", err)
 	}
 }
+
+func TestCancelExpiredPreparationAfterRestartAndPrepareAgain(t *testing.T) {
+	vault := syntheticMigrationVault()
+	engine, _, primaryBefore, backupBefore := createV1AndPreparedV2(t, vault)
+	service, activationToken := prepareActivation(t, engine, vault)
+	service.mu.Lock()
+	service.pending.expires = time.Now().Add(-time.Second)
+	service.mu.Unlock()
+	if err := service.Confirm(activationToken, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); !errors.Is(err, ErrVaultActivationDenied) {
+		t.Fatalf("expired activation token error = %v", err)
+	}
+	if err := os.Remove(dataFileV2); err != nil {
+		t.Fatal(err)
+	}
+
+	// A new service instance models an application restart: no in-memory token
+	// survives, but an explicit cancel flow can still recover v1 ownership.
+	restarted := &v2ActivationService{}
+	cancelToken, err := restarted.BeginCancelV2Preparation(".")
+	if err != nil {
+		t.Fatalf("begin cancel without v2 candidate: %v", err)
+	}
+	if err := restarted.ConfirmCancelV2Preparation(cancelToken); err != nil {
+		t.Fatalf("confirm cancel after restart: %v", err)
+	}
+	record, err := readVaultSelector(vaultSelectorFile)
+	if err != nil || record.Mode != selectorActiveV1 {
+		t.Fatalf("selector after cancellation = (%+v, %v)", record, err)
+	}
+	primaryAfter, _ := os.ReadFile(dataFile)
+	backupAfter, _ := os.ReadFile(dataFile + ".bak")
+	if !bytes.Equal(primaryBefore, primaryAfter) || !bytes.Equal(backupBefore, backupAfter) {
+		t.Fatal("cancellation changed the v1 primary or backup")
+	}
+	if _, err := os.Stat(dataFileV2); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancellation unexpectedly recreated/deleted the v2 candidate: %v", err)
+	}
+
+	// With cancellation committed, migration can explicitly prepare again.
+	if err := MigrateV1VaultToV2(migrationTestPassword, engine); err != nil {
+		t.Fatalf("repeat migration after cancellation: %v", err)
+	}
+	repeated := &v2ActivationService{}
+	newActivationToken, err := repeated.Prepare(".", migrationTestPassword, currentCode(t, vault.TwoFASecret), engine)
+	if err != nil {
+		t.Fatalf("repeat activation preparation: %v", err)
+	}
+	if err := repeated.Confirm(newActivationToken, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err != nil {
+		t.Fatalf("activation after repeated preparation: %v", err)
+	}
+	selection, err := ResolveVaultSelection(".")
+	if err != nil || !selection.ActiveV2 {
+		t.Fatalf("selector after repeated preparation = (%+v, %v)", selection, err)
+	}
+}
+
+func TestCancelPreparationLeavesFilesUntouchedAndRestoresV1Recovery(t *testing.T) {
+	vault := syntheticMigrationVault()
+	engine, _, _, backupBefore := createV1AndPreparedV2(t, vault)
+	_, _ = prepareActivation(t, engine, vault)
+	damagedPrimary := []byte("synthetic damaged v1 primary")
+	if err := os.WriteFile(dataFile, damagedPrimary, 0600); err != nil {
+		t.Fatal(err)
+	}
+	candidateBefore, err := os.ReadFile(dataFileV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &v2ActivationService{}
+	cancelToken, err := service.BeginCancelV2Preparation(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConfirmCancelV2Preparation(cancelToken); err != nil {
+		t.Fatal(err)
+	}
+	primaryAfter, _ := os.ReadFile(dataFile)
+	backupAfter, _ := os.ReadFile(dataFile + ".bak")
+	candidateAfter, _ := os.ReadFile(dataFileV2)
+	if !bytes.Equal(damagedPrimary, primaryAfter) || !bytes.Equal(backupBefore, backupAfter) || !bytes.Equal(candidateBefore, candidateAfter) {
+		t.Fatal("cancel modified v1 data, backup, or v2 candidate")
+	}
+
+	app := NewApp()
+	recoveryToken, err := app.PrepareVaultRecovery(migrationTestPassword)
+	if err != nil {
+		t.Fatalf("v1 backup recovery unavailable after cancellation: %v", err)
+	}
+	if _, err := app.ConfirmVaultRecovery(recoveryToken); err != nil {
+		t.Fatalf("restore v1 backup after cancellation: %v", err)
+	}
+	loaded, err := LoadVault(app.cm)
+	if err != nil || !reflectVaultEqual(loaded, vault) {
+		t.Fatalf("recovered v1 contents = (%#v, %v)", loaded, err)
+	}
+	app.Logout()
+}
+
+func TestCancelPreparationRequiresCurrentExplicitState(t *testing.T) {
+	vault := syntheticMigrationVault()
+	engine, _, _, _ := createV1AndPreparedV2(t, vault)
+	service, activationToken := prepareActivation(t, engine, vault)
+	cancelToken, err := service.BeginCancelV2Preparation(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Confirm(activationToken, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConfirmCancelV2Preparation(cancelToken); !errors.Is(err, ErrVaultV2Protected) {
+		t.Fatalf("cancellation after v2 activation error = %v", err)
+	}
+	if _, err := (&v2ActivationService{}).BeginCancelV2Preparation("."); !errors.Is(err, ErrVaultV2Protected) {
+		t.Fatalf("begin cancellation while v2 active error = %v", err)
+	}
+	selection, err := ResolveVaultSelection(".")
+	if err != nil || !selection.ActiveV2 {
+		t.Fatalf("v2 was not kept active after refused cancellation: (%+v, %v)", selection, err)
+	}
+
+	// An unknown selector is never rewritten as v1 by the cancel path.
+	if err := os.WriteFile(vaultSelectorFile, []byte(`{"format":"unknown"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(vaultSelectorFile)
+	if _, err := (&v2ActivationService{}).BeginCancelV2Preparation("."); !errors.Is(err, ErrVaultSelectionAmbiguous) {
+		t.Fatalf("cancel with unknown selector error = %v", err)
+	}
+	after, _ := os.ReadFile(vaultSelectorFile)
+	if !bytes.Equal(before, after) {
+		t.Fatal("cancel rewrote an unknown selector")
+	}
+}
+
+func TestPrepareTokenFailurePreservesV1Management(t *testing.T) {
+	withVaultDir(t)
+	cm, err := crypto.NewCryptoManager(migrationTestPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault := syntheticMigrationVault()
+	if err := SaveVault(cm, vault); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveVault(cm, vault); err != nil {
+		t.Fatal(err)
+	}
+	cm.Wipe()
+	primaryBefore, _ := os.ReadFile(dataFile)
+	backupBefore, _ := os.ReadFile(dataFile + ".bak")
+	engine := migrationEngine(t)
+	if err := MigrateV1VaultToV2(migrationTestPassword, engine); err != nil {
+		t.Fatal(err)
+	}
+	oldToken := activationChallengeToken
+	activationChallengeToken = func() (string, error) { return "", errors.New("injected token source failure") }
+	t.Cleanup(func() { activationChallengeToken = oldToken })
+	service := &v2ActivationService{}
+	if _, err := service.Prepare(".", migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err == nil {
+		t.Fatal("expected activation token generation failure")
+	}
+	record, err := readVaultSelector(vaultSelectorFile)
+	if err != nil || record.Mode != selectorActiveV1 {
+		t.Fatalf("selector after token generation failure = (%+v, %v)", record, err)
+	}
+	primaryAfter, _ := os.ReadFile(dataFile)
+	backupAfter, _ := os.ReadFile(dataFile + ".bak")
+	if !bytes.Equal(primaryBefore, primaryAfter) || !bytes.Equal(backupBefore, backupAfter) {
+		t.Fatal("failed preparation changed v1 data")
+	}
+	if err := os.WriteFile(dataFile, []byte("damaged after failed preparation"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	recoveryToken, err := app.PrepareVaultRecovery(migrationTestPassword)
+	if err != nil {
+		t.Fatalf("v1 recovery unavailable after token failure: %v", err)
+	}
+	app.CancelVaultRecovery(recoveryToken)
+}

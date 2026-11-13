@@ -28,6 +28,7 @@ var (
 	ErrVaultV2Protected          = errors.New("v1 reset and recovery cannot modify storage while v2 is selected")
 	ErrVaultV2PreparationPending = errors.New("v1 reset and recovery are blocked while a v2 activation is prepared")
 	ErrVaultV2StalePreparation   = errors.New("prepared v2 vault no longer matches the current v1 vault")
+	ErrVaultV2CancelDenied       = errors.New("v2 preparation cancellation is not confirmed or no longer current")
 	ErrVaultActivationDenied     = errors.New("explicit v2 activation confirmation is required")
 	ErrVaultSessionClosed        = errors.New("v2 vault session is closed")
 	ErrVaultSessionChanged       = errors.New("active v2 vault changed outside this session")
@@ -201,14 +202,24 @@ type activationChallenge struct {
 	v2ID     string
 }
 
+type cancelPreparationChallenge struct {
+	token   string
+	expires time.Time
+	paths   activationPaths
+	record  string
+}
+
 // v2ActivationService is intentionally unexported and is not bound through
 // Wails. Confirm is a separate explicit second call using a one-time token.
 type v2ActivationService struct {
-	mu      sync.Mutex
-	pending *activationChallenge
+	mu            sync.Mutex
+	pending       *activationChallenge
+	pendingCancel *cancelPreparationChallenge
 }
 
 const activationChallengeLifetime = 2 * time.Minute
+
+var activationChallengeToken = newChallengeToken
 
 func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string, engine *cryptov2.Engine) (string, error) {
 	if s == nil || engine == nil {
@@ -222,6 +233,7 @@ func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string
 	v2VaultFileMu.Lock()
 	defer v2VaultFileMu.Unlock()
 
+	selectorWasMissing := false
 	if record, err := readVaultSelector(paths.selector); err == nil {
 		switch record.Mode {
 		case selectorActiveV2:
@@ -233,8 +245,11 @@ func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string
 		default:
 			return "", ErrVaultSelectionAmbiguous
 		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", ErrVaultSelectionAmbiguous
+	} else if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", ErrVaultSelectionAmbiguous
+		}
+		selectorWasMissing = true
 	}
 	v1Bytes, err := readVaultFile(paths.v1)
 	if err != nil {
@@ -273,17 +288,119 @@ func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string
 		Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorPreparedV2,
 		SourceV1SHA256: digestHex(v1Bytes), PreparedV2SHA256: digestHex(v2Bytes),
 	}
-	if err := writeVaultSelector(paths.selector, record); err != nil {
+	// Generate the token before persisting v1-prepared. If secure randomness
+	// fails, the active v1 selector remains available for ordinary recovery.
+	token, err := activationChallengeToken()
+	if err != nil {
+		if selectorWasMissing {
+			// Once both files have been explicitly authenticated and compared,
+			// persist the already-active v1 choice if confirmation-token
+			// generation fails. This restores v1 recovery without selecting or
+			// deleting the unactivated candidate.
+			v1Only := vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1}
+			if stateErr := writeVaultSelector(paths.selector, v1Only); stateErr != nil {
+				return "", errors.Join(err, stateErr)
+			}
+		}
 		return "", err
 	}
-	token, err := newChallengeToken()
-	if err != nil {
+	if err := writeVaultSelector(paths.selector, record); err != nil {
 		return "", err
 	}
 	s.mu.Lock()
 	s.pending = &activationChallenge{token: token, expires: time.Now().Add(activationChallengeLifetime), paths: paths, sourceID: record.SourceV1SHA256, v2ID: record.PreparedV2SHA256}
 	s.mu.Unlock()
 	return token, nil
+}
+
+// BeginCancelV2Preparation starts an explicit, short-lived cancellation
+// confirmation. It reads only the selector so cancellation remains available
+// if the candidate was removed or the app restarted after Prepare.
+func (s *v2ActivationService) BeginCancelV2Preparation(directory string) (string, error) {
+	if s == nil {
+		return "", ErrVaultV2CancelDenied
+	}
+	paths := vaultPaths(directory)
+	vaultActivationMu.Lock()
+	record, err := readVaultSelector(paths.selector)
+	if err != nil {
+		vaultActivationMu.Unlock()
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ErrVaultV2CancelDenied
+		}
+		return "", ErrVaultSelectionAmbiguous
+	}
+	if record.Mode == selectorActiveV2 {
+		vaultActivationMu.Unlock()
+		return "", ErrVaultV2Protected
+	}
+	if !validPreparedSelector(record) {
+		vaultActivationMu.Unlock()
+		return "", ErrVaultV2CancelDenied
+	}
+	token, err := activationChallengeToken()
+	if err == nil {
+		s.mu.Lock()
+		s.pendingCancel = &cancelPreparationChallenge{
+			token: token, expires: time.Now().Add(activationChallengeLifetime),
+			paths: paths, record: preparedSelectorIdentity(record),
+		}
+		s.mu.Unlock()
+	}
+	vaultActivationMu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConfirmCancelV2Preparation consumes the explicit confirmation and atomically
+// selects v1-only. It deliberately leaves both v1 files and the v2 candidate
+// untouched. A v2-active, damaged, unknown, or changed selector is never
+// rewritten as v1.
+func (s *v2ActivationService) ConfirmCancelV2Preparation(token string) error {
+	if s == nil {
+		return ErrVaultV2CancelDenied
+	}
+	s.mu.Lock()
+	pending := s.pendingCancel
+	if pending == nil || !challengeValid(pending.token, pending.expires, token) {
+		s.pendingCancel = nil
+		s.mu.Unlock()
+		return ErrVaultV2CancelDenied
+	}
+	s.pendingCancel = nil
+	s.mu.Unlock()
+
+	vaultActivationMu.Lock()
+	defer vaultActivationMu.Unlock()
+	record, err := readVaultSelector(pending.paths.selector)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrVaultV2CancelDenied
+		}
+		return ErrVaultSelectionAmbiguous
+	}
+	if record.Mode == selectorActiveV2 {
+		return ErrVaultV2Protected
+	}
+	if !validPreparedSelector(record) || preparedSelectorIdentity(record) != pending.record {
+		return ErrVaultV2StalePreparation
+	}
+	v1Only := vaultSelectorRecord{
+		Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1,
+	}
+	return writeVaultSelector(pending.paths.selector, v1Only)
+}
+
+func validPreparedSelector(record vaultSelectorRecord) bool {
+	return record.Mode == selectorPreparedV2 && record.ActivatedV2SHA256 == "" &&
+		validSHA256Hex(record.SourceV1SHA256) && validSHA256Hex(record.PreparedV2SHA256)
+}
+
+func preparedSelectorIdentity(record vaultSelectorRecord) string {
+	data, _ := json.Marshal(record) // The record has already passed strict JSON validation.
+	return digestHex(data)
 }
 
 func decryptV1MigrationData(data []byte, masterPassword string) (*Vault, error) {
