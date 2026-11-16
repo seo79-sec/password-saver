@@ -1,12 +1,12 @@
-# PasswordSaver v2 cryptographic foundation
+# PasswordSaver Standard v2 cryptographic architecture
 
 ## Scope and separation from v1
 
-The implementation in `crypto/v2` is a standalone envelope-encryption engine. It does not import the v1 `CryptoManager`, `Vault`, `App`, `SaveVault`, or `LoadVault`; neither does v1 import this package. No application setting selects v2, and this code performs no filesystem writes or migrations.
+The implementation in `crypto/v2` is a standalone envelope-encryption engine. It does not import the v1 `CryptoManager`, `Vault`, `App`, `SaveVault`, or `LoadVault`; neither does v1 import this package. The Wails app uses the engine for an explicitly selected v2 vault and for explicitly confirmed v1-to-v2 migration. New Standard engines register only AES-256-GCM. See [the editions architecture](EDITIONS.md) for the Standard/GOST Lab boundary.
 
 The v1 package can provide implementation precedents and libraries: it already uses Go's `crypto/aes`, `cipher.AEAD`, `crypto/rand`, and `golang.org/x/crypto/argon2`. The v2 package independently uses those primitives but does not reuse v1 serialization, session state, or signing. Its key hierarchy, AAD, and envelope are incompatible with v1 by design.
 
-The v1 vault is JSON containing its existing encrypted-data tuple and a trailing HMAC made with the static v1 application key. `SaveVault` creates an encrypted `.bak` and commits through the existing platform-specific atomic-replacement helpers (`MoveFileEx` with write-through on Windows; rename and directory sync on Unix-like systems). `App` owns the v1 authorization, in-memory vault, reset, and recovery flows. These behaviors and tests remain unchanged. The static v1 HMAC key is not referenced by v2.
+The v1 vault is JSON containing its existing encrypted-data tuple and a trailing HMAC made with the static v1 application key. `SaveVault` creates an encrypted `.bak` and commits through the existing platform-specific atomic-replacement helpers (`MoveFileEx` with write-through on Windows; rename and directory sync on Unix-like systems). `App` owns the v1 authorization, in-memory vault, reset, and recovery flows. The static v1 HMAC key is not referenced by v2. The formats stay distinct; selecting v2 never attempts a v1 read or fallback.
 
 ## v2 container
 
@@ -50,7 +50,7 @@ The strict JSON encoding plus these length-delimited AAD encodings avoid ambiguo
 
 ## Key flow and lifetime
 
-1. For each encryption, `crypto/rand.Reader` supplies a fresh 32-byte DEK, a 32-byte Argon2id salt, and separate algorithm-generated nonces for wrapping and payload encryption. `AEADAlgorithm` owns both nonce generation and nonce validation. AES-256-GCM reads 12 random bytes. The reusable RFC 9058 MGM nonce policy generates one block of random bytes and clears the most-significant bit, matching the RFC's `(n-1)`-bit ICN representation in an `n`-bit block; it rejects a wrong block length or a nonce with that bit set. This policy is only a nonce helper; Kuznyechik-MGM itself is not implemented.
+1. For each encryption, `crypto/rand.Reader` supplies a fresh 32-byte DEK, a 32-byte Argon2id salt, and separate algorithm-generated nonces for wrapping and payload encryption. `AEADAlgorithm` owns both nonce generation and nonce validation. Standard's AES-256-GCM provider reads 12 random bytes. The RFC 9058 MGM nonce policy is only a generic nonce helper; it is not an MGM provider and is not registered in the Standard engine.
 2. Argon2id derives a 32-byte KEK from the master password and fresh salt. The default is time cost 3, 64 MiB, and four lanes. Accepted container bounds are time 2–6, memory 19–256 MiB, and 1–8 threads. The parser enforces these bounds before key derivation.
 3. The KEK wraps the DEK with the selected AEAD and DEK-wrap AAD.
 4. The DEK encrypts one payload with the same AEAD implementation and payload AAD.
@@ -66,7 +66,7 @@ Go cannot promise that every compiler/runtime copy of a string or byte slice has
 
 ## Algorithm extension point
 
-`AEADAlgorithm` exposes an ID, key/nonce/tag sizes, algorithm-specific nonce generation and validation, and a constructor returning Go's `cipher.AEAD`. The engine validates nonce policy both when generating a nonce and when parsing a container, checks the AEAD's reported nonce/tag sizes, and passes AAD through `Seal` and `Open`. The registry rejects duplicate or unknown identifiers. AES-256-GCM is the only production algorithm provider in this stage. The RFC 9058 nonce policy and test-only provider exercise the extension point; they are not MGM encryption. A future Kuznyechik-MGM implementation must provide a reviewed `cipher.AEAD`-compatible implementation, enforce the full RFC 9058 requirements, and pass known-answer and interoperability tests before registration. Do not implement a cipher or mode locally, and do not silently reinterpret existing IDs.
+`AEADAlgorithm` exposes an ID, key/nonce/tag sizes, algorithm-specific nonce generation and validation, and a constructor returning Go's `cipher.AEAD`. The engine validates nonce policy both when generating a nonce and when parsing a container, checks the AEAD's reported nonce/tag sizes, and passes AAD through `Seal` and `Open`. The registry rejects duplicate or unknown identifiers. Standard constructs the registry without optional providers and uses AES-256-GCM. A future GOST Lab provider must pass independent implementation/security review, license review, RFC known-answer tests, interoperability tests, and Windows tests before being registered in that edition. Do not implement a cipher or mode locally, and do not silently reinterpret existing IDs.
 
 ## Threat model and limits
 
@@ -74,10 +74,29 @@ AEAD authenticates the encrypted DEK, payload, and covered metadata. A wrong mas
 
 This package does not implement password-strength policy beyond the current 12-byte minimum, online throttling, OS key storage, anti-malware protection, memory isolation, or file replacement/backup. Argon2id only raises the cost of offline password guessing; weak master passwords remain vulnerable to offline attacks. Random-source failure aborts encryption.
 
-## Future migration procedure
+## Storage, recovery, and platform durability
 
-Migration is deliberately out of scope. A later integration must be explicit and separately reviewed: preserve the original v1 primary and `.bak`; authenticate and decrypt v1 only with the existing v1 loader; write a v2 container to a separate temporary or side-by-side path; reopen and authenticate the v2 output; then request explicit user confirmation before switching the active format. Retain recoverable v1 bytes until successful verification and a documented rollback window. Never infer v2 from a failed v1 password, overwrite the only v1 copy, or silently migrate on `LoadVault`.
+The application selects v1 or v2 through a strict durable selector. Migration
+authenticates the v1 source, writes a separate v2 candidate, reopens it, and
+requires a second explicit confirmation before the selector changes. V1
+primary and backup files are preserved. V2 saves authenticate and snapshot
+the current container, verify an encrypted `.bak`, and atomically replace the
+primary. Recovery of v2 is a separate two-stage operation: it authenticates
+the backup, binds confirmation to the exact backup and primary snapshots,
+archives a damaged primary, and restores only the bytes that were verified.
+It never falls back to v1. A valid active-v2 selector remains authoritative
+even when the primary is missing or damaged.
 
-## Atomic storage integration
+On Windows, same-directory replacements use `MoveFileEx` with
+`MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; no-replace creation omits
+the replace flag. Windows does not expose the same directory-fsync operation
+used on Unix-like systems, so durability relies on the write-through move and
+file sync before replacement. Hosted Windows CI builds the Wails executable;
+manual restart/power-loss and filesystem tests still require a Windows test
+machine. See [RELEASING.md](RELEASING.md) and [WINDOWS_MANUAL_TEST.md](WINDOWS_MANUAL_TEST.md).
 
-The current `SaveVault`/`LoadVault` path consumes v1's `EncryptedData` and static HMAC envelope. A v2 container cannot be passed to those functions, and doing so would break existing files and recovery expectations. If v2 storage is integrated later, keep format dispatch explicit, preserve v1 reading, and reuse/adapt the existing atomic replacement and encrypted-backup mechanisms only after defining how v1 and v2 backups are distinguished and restored. This PR keeps all persistence code untouched.
+Recovery does not prove freshness against a process that can rewrite all local
+files. Restoring `.bak` can lose data saved after that snapshot. The recovery
+dialog states this and requires explicit confirmation. Go memory clearing and
+filesystem durability guarantees remain best effort within the documented
+platform APIs.

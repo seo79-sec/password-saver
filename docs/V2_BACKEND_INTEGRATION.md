@@ -1,8 +1,8 @@
-# PasswordSaver v2 backend session and activation
+# PasswordSaver Standard v2 backend session and activation
 
 ## Scope and current UI behavior
 
-This stage adds backend infrastructure only. It does not bind a v2 login, save, or activation method to Wails, and it does not enable v2 by default. Existing v1 files remain `vault_data.enc` and `vault_data.enc.bak`. The candidate/active v2 file is `vault_data.v2.enc`; `vault_format.state` records a durable selection. Normal v1 methods keep using v1 only. If the selector says v2, the existing Wails `Login` refuses to open v1, preventing an automatic downgrade until a future UI flow is added.
+The Wails and Svelte integration supports v1 and explicitly selected v2. Standard creates v2 engines with AES-256-GCM only. Existing v1 files remain `vault_data.enc` and `vault_data.enc.bak`. The candidate/active v2 file is `vault_data.v2.enc`; `vault_format.state` records a durable selection. The UI routes login and saves according to the validated selector. An active-v2 selector never permits v1 fallback.
 
 ## Opaque v2 session lifecycle
 
@@ -58,6 +58,28 @@ The v1 storage format, AES-GCM/Argon2id parameters, v2 container format, existin
 
 AEAD cannot distinguish a wrong master password from damage to the authenticated key wrapper. Selector files are not protected against full local filesystem rollback. External programs do not honor the process mutex; hash checks detect persistent changes before/after operations but cannot eliminate every cross-process time-of-check/time-of-use race. Random nonce uniqueness across independent app restarts remains probabilistic because older nonce history is not persisted. Temporary plaintext and key wiping in Go is best effort.
 
-## Next Wails/Svelte stage
+## Standard recovery behavior
 
-Before exposing v2 to users, add an explicit format-aware login flow that calls the internal v2 unlock path only after reading the selector; present and require an explicit confirmation for the activation challenge; render TOTP flow without returning key material; and route all CRUD operations through the selected active session. Add user-visible handling for ambiguous selector state and uncertain commits. Keep format selection and backup recovery in backend code, and add end-to-end Windows tests before enabling any v2 UI path. Do not auto-activate v2 merely because a candidate file exists.
+When the active v2 primary is damaged or missing, the UI offers recovery only
+if a `.bak` exists. Go authenticates and parses the backup, binds the challenge
+to the exact backup and primary snapshots, and waits for explicit confirmation.
+An empty file, arbitrary bytes, a truncated container, a malformed supported
+container, or a supported container whose AEAD authentication fails can be
+treated as damaged. A recognizable unsupported format/version, algorithm, or
+KDF is refused even if later JSON is truncated; a valid v1-shaped file is also
+refused. A valid current v2 Vault cannot be replaced by an older backup. The
+damaged primary is copied byte-for-byte to a unique `.corrupt-*` archive before
+the already-verified backup bytes atomically replace it. The v2 selector,
+backup, and v1 primary/backup are not changed by recovery. There is no fallback
+to v1. A failed or canceled operation clears the pending v2 session and leaves
+the app locked.
+
+Recovery restores authorization settings from the backup snapshot. If it
+predates enabling TOTP, the restored vault has TOTP disabled and does not prompt
+for that second factor. The UI calls this out before the separate confirmation.
+The selector and local files are not protected against an attacker with full
+filesystem control; such an attacker can replace both primary and backup or
+roll back selector state. This flow prevents accidental or implicit rollback,
+but cannot prove that a valid backup is the newest copy. Users who need stronger
+freshness guarantees need an independently protected version counter or a
+trusted external recovery record; neither is part of the current format.

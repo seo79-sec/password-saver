@@ -23,6 +23,7 @@ const (
 type VaultPublicStatus struct {
 	State              string `json:"state"`
 	V2ContainerPresent bool   `json:"v2ContainerPresent"`
+	V2BackupPresent    bool   `json:"v2BackupPresent"`
 	PreparationFresh   bool   `json:"preparationFresh"`
 }
 
@@ -84,6 +85,10 @@ func vaultPublicStatusLocked(directory string) VaultPublicStatus {
 	if candidateErr != nil {
 		candidate = false
 	}
+	backup, backupErr := pathExists(paths.v2 + ".bak")
+	if backupErr != nil {
+		backup = false
+	}
 	switch record.Mode {
 	case selectorActiveV1:
 		return VaultPublicStatus{State: VaultStateV1Active, V2ContainerPresent: candidate}
@@ -94,7 +99,7 @@ func vaultPublicStatusLocked(directory string) VaultPublicStatus {
 		}
 		return VaultPublicStatus{State: VaultStateV1Prepared, V2ContainerPresent: candidate, PreparationFresh: fresh}
 	case selectorActiveV2:
-		return VaultPublicStatus{State: VaultStateV2Active, V2ContainerPresent: candidate}
+		return VaultPublicStatus{State: VaultStateV2Active, V2ContainerPresent: candidate, V2BackupPresent: backup}
 	default:
 		return VaultPublicStatus{State: VaultStateAmbiguous}
 	}

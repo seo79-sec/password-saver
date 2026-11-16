@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, friendlyBackendError } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -42,6 +42,13 @@ test('vault status chooses only the selected login path and blocks ambiguous sta
   assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
   assert.equal(loginModeForVaultStatus({ state: 'ambiguous' }), 'blocked');
   assert.equal(loginModeForVaultStatus(null), 'blocked');
+});
+
+test('v2 backup recovery is offered only when v2 is active and backup exists', () => {
+  assert.equal(canOfferV2BackupRecovery({ state: 'v2-active', v2BackupPresent: true }), true);
+  assert.equal(canOfferV2BackupRecovery({ state: 'v2-active', v2BackupPresent: false }), false);
+  assert.equal(canOfferV2BackupRecovery({ state: 'v1-active', v2BackupPresent: true }), false);
+  assert.equal(canOfferV2BackupRecovery({ state: 'ambiguous', v2BackupPresent: true }), false);
 });
 
 test('backend errors are rendered as safe actionable messages', () => {

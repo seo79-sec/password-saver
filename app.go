@@ -31,6 +31,7 @@ type App struct {
 	twoFAVerified    bool // НОВОЕ: Флаг успешного прохождения 2FA
 	pendingReset     resetChallenge
 	pendingRecover   recoveryChallenge
+	pendingV2Recover v2RecoveryChallenge
 	idleTimer        *time.Timer
 	idleTimeout      time.Duration
 	lastActivity     time.Time
@@ -657,6 +658,7 @@ func (a *App) clearPendingRecoveryLocked() {
 func (a *App) clearPendingChallengesLocked() {
 	a.pendingReset = resetChallenge{}
 	a.clearPendingRecoveryLocked()
+	a.clearPendingV2RecoveryLocked()
 }
 
 // --- ЛОГИКА ДВУХФАКТОРНОЙ АУТЕНТИФИКАЦИИ ---

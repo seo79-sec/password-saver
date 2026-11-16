@@ -73,6 +73,10 @@ export function loginModeForVaultStatus(status) {
   return 'blocked';
 }
 
+export function canOfferV2BackupRecovery(status) {
+  return status?.state === 'v2-active' && status?.v2BackupPresent === true;
+}
+
 export function friendlyBackendError(error) {
   const message = String(error?.message ?? error ?? '').toLowerCase();
   if (/authentication failed|incorrect .*master password|wrong.*password|неверный мастер-пароль/.test(message)) {

@@ -6,18 +6,20 @@
     Login, LoginV2, GetVaultStatus, PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
     Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
+    PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, friendlyBackendError } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
   let isLoggedIn = false;
-  let vaultStatus = { state: 'loading', v2ContainerPresent: false, preparationFresh: false };
+  let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
   let loginFormat = 'v1';
   let masterPassword = '';
   let errorMessage = '';
   let lockReason = ''; 
+  let recoveryBusy = false;
 
   let accounts = [];
   
@@ -191,6 +193,7 @@
     showAbout = false; dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
     showMigrationModal = false; migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
+    recoveryBusy = false;
     cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
@@ -289,6 +292,53 @@
         }, () => { CancelVaultRecovery(recoveryToken); masterPassword = ''; });
         masterPassword = '';
       } catch { errorMessage = friendlyBackendError(err); masterPassword = ''; }
+    }
+  }
+
+  async function handleV2Recovery() {
+    if (recoveryBusy) return;
+    const generation = sessionGeneration.capture();
+    const password = masterPassword;
+    masterPassword = '';
+    recoveryBusy = true;
+    try {
+      const token = await PrepareV2VaultRecovery(password);
+      if (!sessionGeneration.isCurrent(generation) || isLoggedIn) {
+        CancelV2VaultRecovery(token);
+        return;
+      }
+      showConfirm(
+        'Восстановить хранилище v2?',
+        'Резервная копия проверена этим мастер-паролем. Текущее основное хранилище будет сохранено рядом для диагностики, затем его заменит копия. Изменения после создания копии могут быть потеряны. Настройки защиты тоже восстановятся из копии: если она создана до включения TOTP, после восстановления TOTP останется выключен. Полный доступ к локальным файлам позволяет подменить или откатить и хранилище, и селектор; приложение не может гарантировать защиту от такого отката. Селектор останется на v2; автоматического перехода на v1 не будет.',
+        async () => {
+          if (!sessionGeneration.isCurrent(generation)) return;
+          try {
+            const requires2FA = await ConfirmV2VaultRecovery(token);
+            if (!sessionGeneration.isCurrent(generation)) return;
+            errorMessage = '';
+            if (requires2FA) {
+              show2FAInput = true;
+            } else {
+              sessionGeneration.advance();
+              isLoggedIn = true;
+              lockReason = '';
+              loadAccounts();
+            }
+            await refreshVaultStatus();
+          } catch (recoveryErr) {
+            if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(recoveryErr);
+          } finally {
+            if (sessionGeneration.isCurrent(generation)) recoveryBusy = false;
+          }
+        },
+        () => {
+          CancelV2VaultRecovery(token);
+          if (sessionGeneration.isCurrent(generation)) recoveryBusy = false;
+        }
+      );
+    } catch (err) {
+      if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(err);
+      recoveryBusy = false;
     }
   }
 
@@ -403,7 +453,7 @@
 
   async function refreshVaultStatus() {
     try { vaultStatus = await GetVaultStatus(); }
-    catch (error) { vaultStatus = { state: 'ambiguous', v2ContainerPresent: false, preparationFresh: false }; console.error(error); }
+    catch (error) { vaultStatus = { state: 'ambiguous', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false }; console.error(error); }
   }
 
   function openMigrationModal() {
@@ -544,6 +594,12 @@
           <button class="submit-btn" style="height: 42px;" on:click={handleVerify2FA}>Подтвердить код</button>
           <button class="btn-micro" style="margin-top: 0;" on:click={async () => { await Logout(); clearSensitiveState(); errorMessage = ''; await refreshVaultStatus(); }}>← Назад к паролю</button>
         </div>
+      {/if}
+
+      {#if canOfferV2BackupRecovery(vaultStatus) && !show2FAInput}
+        <button class="btn-secondary" disabled={recoveryBusy} on:click={handleV2Recovery}>
+          {recoveryBusy ? 'Проверка резервной копии…' : 'Восстановить из резервной копии v2'}
+        </button>
       {/if}
       
       {#if errorMessage}

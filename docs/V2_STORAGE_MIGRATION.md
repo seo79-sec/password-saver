@@ -2,9 +2,9 @@
 
 ## Scope and active files
 
-This layer is separate from the Wails interface and from the existing `SaveVault` and `LoadVault` functions. The current application continues to use `vault_data.enc` and `vault_data.enc.bak` as its active v1 files. `vault_data.v2.enc` is an explicitly addressed v2 candidate produced by the standalone API; finding it does not switch the application to v2. Both files may exist, and v1 remains active until a later, separately reviewed activation change.
+The v2 storage layer is separate from v1's `SaveVault` and `LoadVault` serialization. The application supports both formats through a strict selector. `vault_data.enc` and `vault_data.enc.bak` retain their v1 format; `vault_data.v2.enc` is a separately encrypted v2 container and `vault_format.state` records whether v1 or v2 is active. Merely finding a v2 candidate does not switch formats; migration and activation require explicit, separate user actions.
 
-The layer uses the existing `Vault` structure, including every current account field, `TwoFAEnabled`, and `TwoFASecret`. It serializes that structure to JSON and delegates encryption, parsing limits, and AEAD authentication to `crypto/v2`. The v2 file has no v1 static HMAC. The existing v1 serializer, encryption format, primary file, backup, and restore behavior are not changed by migration.
+The layer uses the existing `Vault` structure, including every current account field, `TwoFAEnabled`, and `TwoFASecret`. It serializes that structure to JSON and delegates encryption, parsing limits, and AEAD authentication to `crypto/v2`. PasswordSaver Standard registers AES-256-GCM only. The v2 file has no v1 static HMAC. The existing v1 serializer, encryption format, primary file, backup, and restore behavior are not changed by migration.
 
 ## Format detection and errors
 
@@ -29,12 +29,12 @@ New v2 files are written to a mode-0600 temporary file in the destination direct
 - Before commit, a process crash or write/flush failure can leave a hidden temporary file. The source remains unchanged; a future cleanup routine may remove stale `.vault-v2-stage-*` files after validating that they are not active.
 - A no-replace collision leaves the existing target untouched.
 - If the filesystem reports a directory-sync error after commit, the result is uncertain. The v1 source remains intact and authoritative; inspect and authenticate the staged v2 candidate before retrying.
-- A damaged v2 file is rejected. The layer does not automatically restore `.bak`, because it has no generation counter or trusted freshness metadata to prove that the backup is newer. Recovery must be an explicit future operation that authenticates the selected copy and verifies its contents before replacement.
+- A damaged or missing active v2 primary is never automatically replaced. The Wails flow offers explicit two-stage recovery only after the backup authenticates with the supplied master password. It binds confirmation to the exact backup and primary snapshots, preserves a damaged primary in a `.corrupt-*` archive, and restores the checked backup bytes. There is no freshness counter; recovery can lose saves made after the backup snapshot, which the confirmation dialog discloses.
 - Disk-full, permission, and filesystem errors are returned without logging plaintext. Migration does not delete or rewrite v1 data.
 
 ## Rollback and future activation
 
-Until v2 activation is implemented, rollback is simply to keep using the unchanged v1 active path. The v2 candidate may be retained for analysis or explicitly removed after the user verifies that the v1 primary and backup remain available. There is no automatic cleanup, restore, or active-file switch in this stage.
+Before activation, rollback is simply to keep using the unchanged v1 active path; v2 preparation can be explicitly cancelled. After activation, v2 remains selected through missing/corrupt-primary recovery; neither login nor recovery falls back to v1. The v2 candidate is not automatically deleted.
 
 A future activation step must be separate and explicit: authenticate both formats; preserve the v1 primary and backup; create and verify a v2 backup; require user confirmation; atomically change a durable format-selection record; and define recovery for power loss between each step. It must also establish freshness/version metadata before considering any automatic backup selection. Never choose an older backup solely because the current file fails authentication.
 
@@ -43,5 +43,5 @@ A future activation step must be separate and explicit: authenticate both format
 - The UI and normal `SaveVault`/`LoadVault` paths do not call this v2 layer.
 - AEAD authentication failure cannot uniquely identify wrong-password versus authenticated-byte damage.
 - Process-level locking does not prevent an unrelated process from editing files. Migration detects persistent source changes around the operation but cannot provide a universal cross-platform external lock.
-- No migration cancellation/resume journal, stale temporary-file cleanup, v2 backup recovery flow, or active-format switch exists yet.
+- No migration cancellation/resume journal, stale temporary-file cleanup, or anti-rollback freshness record exists yet. The active-format switch and explicit v2 backup recovery flow are implemented; recovery never falls back to v1.
 - Memory clearing is best effort in Go; strings, compiler/runtime copies, and cryptographic internals cannot be guaranteed erased.

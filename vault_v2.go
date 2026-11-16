@@ -94,10 +94,16 @@ func readV2VaultAt(path string, engine *cryptov2.Engine, masterPassword string) 
 func decryptV2VaultData(data []byte, engine *cryptov2.Engine, masterPassword string) (*Vault, error) {
 	format, err := DetectVaultFormat(data)
 	if err != nil {
+		// Unknown bytes are damaged data, not evidence of a supported or
+		// unsupported format. Callers that can repair a damaged v2 primary may
+		// do so only through their explicit authenticated recovery flow.
+		return nil, ErrVaultV2Corrupt
+	}
+	if format == VaultFormatV1 {
 		return nil, ErrVaultUnsupportedFormat
 	}
 	if format != VaultFormatV2 {
-		return nil, ErrVaultUnsupportedFormat
+		return nil, ErrVaultV2Corrupt
 	}
 	if engine == nil {
 		return nil, errors.New("v2 crypto engine is unavailable")

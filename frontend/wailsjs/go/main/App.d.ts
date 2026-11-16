@@ -40,6 +40,12 @@ export function Logout():Promise<void>;
 
 export function PrepareV2Migration(arg1:string,arg2:string):Promise<string>;
 
+export function PrepareV2VaultRecovery(arg1:string):Promise<string>;
+
+export function ConfirmV2VaultRecovery(arg1:string):Promise<boolean>;
+
+export function CancelV2VaultRecovery(arg1:string):Promise<void>;
+
 export function PrepareVaultRecovery(arg1:string):Promise<string>;
 
 export function ResetVault(arg1:string):Promise<void>;
