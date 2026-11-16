@@ -25,10 +25,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ("$env:GITHUB_REF" -ne "refs/heads/main") { throw "Only main may be released" }
+          git ls-remote --exit-code --tags origin refs/tags/v2.0.0 | Out-Null
+          if ($LASTEXITCODE -eq 0) { throw "v2.0.0 tag already exists; do not overwrite" }
           $config = Get-Content .\wails.json -Raw | ConvertFrom-Json
           if ($config.info.productVersion -ne "2.0.0") { throw "Unexpected productVersion" }
-          gh release view v2.0.0 --repo $env:GITHUB_REPOSITORY 2>$null
-          if ($LASTEXITCODE -eq 0) { throw "v2.0.0 release already exists; do not replace its assets" }
+          $existing = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect existing releases" }
+          if ($existing | Where-Object { $_.tagName -eq 'v2.0.0' }) { throw "v2.0.0 release already exists; do not replace its assets" }
 
       - uses: actions/setup-go@v5
         with:
