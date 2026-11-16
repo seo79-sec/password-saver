@@ -92,3 +92,31 @@ func TestWindowsStorageRejectsDirectoryJunction(t *testing.T) {
 		t.Fatalf("known vault filename as junction accepted: %v", err)
 	}
 }
+
+func TestWriteResidueRejectsWindowsReparsePoint(t *testing.T) {
+	dir := withVaultDir(t)
+	target := t.TempDir()
+	contents := []byte("synthetic unrelated directory data")
+	writeStorageTestFile(t, filepath.Join(target, "preserve.txt"), contents)
+	junction := filepath.Join(dir, ".vault-write-123")
+	if strings.ContainsAny(junction+target, "%!^&|<>\r\n\"") {
+		t.Skip("temp directory contains cmd metacharacters")
+	}
+	if output, err := exec.Command("cmd", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
+		t.Fatalf("create test junction: %v: %s", err, output)
+	}
+	t.Cleanup(func() { _ = os.Remove(junction) })
+	if reparse, err := storagePathIsReparsePoint(junction); err != nil || !reparse {
+		t.Fatalf("fixture is not a reparse point: %v", err)
+	}
+	if _, err := scanVaultDirectory(dir, managedVaultDirectory); !errors.Is(err, ErrVaultStorageUnsafe) {
+		t.Fatalf("temporary-name junction accepted: %v", err)
+	}
+	if status := storageLocationStatus(); status.State != "error" || status.Diagnostic != "unsafe-entry" {
+		t.Fatalf("junction diagnostics = %+v", status)
+	}
+	assertStorageBytes(t, filepath.Join(target, "preserve.txt"), contents)
+	if _, err := os.Lstat(junction); err != nil {
+		t.Fatal("junction removed automatically")
+	}
+}

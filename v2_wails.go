@@ -87,7 +87,24 @@ func (a *App) GetStorageLocationStatus() StorageLocationStatus {
 func (a *App) OpenStorageFolder() error {
 	route, err := discoverStorageRoute()
 	if err != nil {
-		return err
+		if !errors.Is(err, ErrVaultStorageUnsafe) {
+			return err
+		}
+		// A suspicious child must remain untouched, but the user still needs
+		// to inspect/export it manually. Only open the fixed managed directory
+		// after rechecking every directory component; never follow a child.
+		location, locationErr := configuredStorageLocation()
+		if locationErr != nil {
+			return locationErr
+		}
+		if pathErr := checkExistingPathComponents(location.Root); pathErr != nil {
+			return pathErr
+		}
+		info, statErr := os.Lstat(location.Root)
+		if statErr != nil || !info.IsDir() {
+			return ErrVaultStorageUnsafe
+		}
+		return storageFolderOpener(location.Root)
 	}
 	if route.State == storageRouteNeedsMigration {
 		return ErrVaultDataLocation

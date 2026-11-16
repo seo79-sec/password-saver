@@ -76,6 +76,8 @@ export namespace main {
 	    algorithm: string;
 	    backupPresent: boolean;
 	    migrationPending: boolean;
+	    temporaryFiles: number;
+	    diagnostic: string;
 
 	    static createFrom(source: any = {}) {
 	        return new StorageLocationStatus(source);
@@ -90,6 +92,8 @@ export namespace main {
 	        this.algorithm = source["algorithm"];
 	        this.backupPresent = source["backupPresent"];
 	        this.migrationPending = source["migrationPending"];
+	        this.temporaryFiles = source["temporaryFiles"];
+	        this.diagnostic = source["diagnostic"];
 	    }
 	}
 

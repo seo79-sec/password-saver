@@ -51,6 +51,17 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 	v2VaultFileMu.Lock()
 	defer v2VaultFileMu.Unlock()
 
+	// Recheck under the write locks; route discovery alone is not the final
+	// initialization guard. Residue can be an interrupted first container or
+	// selector publication and must never be treated as an empty directory.
+	scan, err := scanVaultDirectoryDetails(directory, managedVaultDirectory)
+	if err != nil {
+		return err
+	}
+	if scan.TemporaryFiles > 0 {
+		return ErrVaultStorageIncomplete
+	}
+
 	for _, path := range []string{paths.selector, paths.v1, paths.v1 + ".bak", paths.v2, paths.v2 + ".bak"} {
 		exists, err := pathExists(path)
 		if err != nil {

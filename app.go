@@ -337,7 +337,7 @@ func (a *App) updateVault(change func(*Vault)) error {
 		if errors.Is(err, errVaultCommitUncertain) {
 			return err
 		}
-		if errors.Is(err, ErrVaultStorageConflict) || errors.Is(err, ErrVaultStorageMigration) || errors.Is(err, ErrVaultStorageUnsafe) || errors.Is(err, ErrVaultDataLocation) {
+		if errors.Is(err, ErrVaultStorageConflict) || errors.Is(err, ErrVaultStorageMigration) || errors.Is(err, ErrVaultStorageUnsafe) || errors.Is(err, ErrVaultDataLocation) || errors.Is(err, ErrVaultStorageIncomplete) {
 			wipeVault(before)
 			a.logoutLocked()
 			return err

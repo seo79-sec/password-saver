@@ -26,6 +26,7 @@ var (
 	ErrVaultStorageMigrationBusy    = errors.New("a storage migration is already pending")
 	ErrVaultStorageMigrationExpired = errors.New("storage migration confirmation expired or changed")
 	ErrVaultStorageCommitUncertain  = errors.New("storage copy completed but directory synchronization was not confirmed")
+	ErrVaultStorageIncomplete       = errors.New("unfinished vault write requires manual inspection before initialization")
 )
 
 type storageLocation struct {
@@ -42,6 +43,7 @@ const (
 	storageRouteReady storageRouteState = iota
 	storageRouteNeedsMigration
 	storageRouteConflict
+	storageRouteIncomplete
 )
 
 const storageMigrationReceiptFile = "storage.migration.json"
@@ -55,10 +57,11 @@ type storageMigrationReceipt struct {
 }
 
 type storageRoute struct {
-	Location   storageLocation
-	State      storageRouteState
-	LegacyDirs []string
-	SourceDir  string
+	Location       storageLocation
+	State          storageRouteState
+	LegacyDirs     []string
+	SourceDir      string
+	TemporaryFiles int
 }
 
 type StorageLocationStatus struct {
@@ -69,6 +72,8 @@ type StorageLocationStatus struct {
 	Algorithm        string   `json:"algorithm"`
 	BackupPresent    bool     `json:"backupPresent"`
 	MigrationPending bool     `json:"migrationPending"`
+	TemporaryFiles   int      `json:"temporaryFiles"`
+	Diagnostic       string   `json:"diagnostic"`
 }
 
 // The override is only used by tests. Production callers always resolve the
@@ -296,10 +301,11 @@ func discoverStorageRouteWithSource(explicitSource string) (storageRoute, error)
 	if err != nil {
 		return storageRoute{}, err
 	}
-	target, err := scanVaultDirectory(location.Root, managedVaultDirectory)
+	targetScan, err := scanVaultDirectoryDetails(location.Root, managedVaultDirectory)
 	if err != nil {
 		return storageRoute{}, err
 	}
+	target := targetScan.Files
 	legacyCandidates, err := legacyDirectoryProvider(location.Root)
 	if err != nil {
 		return storageRoute{}, err
@@ -330,7 +336,14 @@ func discoverStorageRouteWithSource(explicitSource string) (storageRoute, error)
 			legacyWithFiles = append(legacyWithFiles, candidate)
 		}
 	}
-	route := storageRoute{Location: location, LegacyDirs: legacyWithFiles}
+	route := storageRoute{Location: location, LegacyDirs: legacyWithFiles, TemporaryFiles: targetScan.TemporaryFiles}
+	// Residue is not a container, and must not make a partially completed
+	// first write look like a clean installation. A selector alone is also
+	// insufficient. Keep real backup recovery available when a backup exists.
+	if targetScan.TemporaryFiles > 0 && target[dataFile] == nil && target[dataFile+".bak"] == nil && target[dataFileV2] == nil && target[dataFileV2+".bak"] == nil {
+		route.State = storageRouteIncomplete
+		return route, nil
+	}
 	if len(legacyWithFiles) > 1 {
 		route.State = storageRouteConflict
 		return route, nil
@@ -427,6 +440,17 @@ func ensureStorageScaffold(location storageLocation, createVaultRoot bool) error
 		}
 		for _, entry := range entries {
 			path := filepath.Join(location.Root, entry.Name())
+			if isVaultWriteTemporary(entry.Name()) {
+				// Do not chmod, open, delete or otherwise operate on residue.
+				// In particular it may have been unlinked by a concurrent writer.
+				if _, err := statStorageFile(path, vaultWriteTemporaryLimit()); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return ErrVaultStorageUnsafe
+				}
+				continue
+			}
+			if _, known := knownVaultFileLimits()[entry.Name()]; !known && entry.Name() != storageMigrationReceiptFile && !isVaultDiagnosticArchive(entry.Name()) {
+				return ErrVaultStorageUnsafe
+			}
 			info, err := os.Lstat(path)
 			if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 				return ErrVaultStorageUnsafe
@@ -499,6 +523,8 @@ func activeVaultStorageDirectory() (string, error) {
 		return "", ErrVaultStorageMigration
 	case storageRouteConflict:
 		return "", ErrVaultStorageConflict
+	case storageRouteIncomplete:
+		return "", ErrVaultStorageIncomplete
 	}
 	if err := ensureStorageScaffold(route.Location, true); err != nil {
 		return "", err
@@ -509,10 +535,20 @@ func activeVaultStorageDirectory() (string, error) {
 func storageLocationStatus() StorageLocationStatus {
 	route, err := discoverStorageRoute()
 	if err != nil {
-		return StorageLocationStatus{State: "error"}
+		diagnostic := "unavailable"
+		if errors.Is(err, ErrVaultStorageUnsafe) {
+			diagnostic = "unsafe-entry"
+		}
+		return StorageLocationStatus{State: "error", Diagnostic: diagnostic}
 	}
-	status := StorageLocationStatus{Path: route.Location.Root}
+	status := StorageLocationStatus{Path: route.Location.Root, TemporaryFiles: route.TemporaryFiles}
+	if route.TemporaryFiles > 0 {
+		status.Diagnostic = "write-residue"
+	}
 	switch route.State {
+	case storageRouteIncomplete:
+		status.State, status.Diagnostic = "incomplete-write", "incomplete-write"
+		return status
 	case storageRouteNeedsMigration:
 		status.State = "migration-required"
 		status.MigrationPending = true

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, hasStorageBackup, friendlyBackendError } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, storageDiagnosticNotice, hasStorageBackup, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -156,4 +156,38 @@ test('late HIBP response after abort is rejected and cannot commit UI state', as
   let applied = false;
   assert.equal(await resolveForGeneration(Promise.resolve([{ id: 'a', breached: true }]), generation, token, () => { applied = true; }), false);
   assert.equal(applied, false);
+});
+
+
+test('admissible write residue warns without blocking v1 or v2 login and backup recovery', () => {
+  const notice = storageDiagnosticNotice({ state: 'ready', temporaryFiles: 2, diagnostic: 'write-residue' });
+  assert.equal(notice.kind, 'warning');
+  assert.equal(notice.canOpenFolder, true);
+  assert.match(notice.message, /Основное хранилище не изменено/);
+  assert.match(notice.message, /Автоматическая очистка не выполняется/);
+  assert.equal(storageLocationMode({ state: 'ready' }), 'ready');
+  assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
+  assert.equal(loginModeForVaultStatus({ state: 'v1-active' }), 'v1');
+  assert.equal(canOfferV2BackupRecovery({ state: 'v2-active', v2BackupPresent: true }), true);
+});
+
+test('residue without a container is diagnostic and never enables setup', () => {
+  const status = { state: 'incomplete-write', temporaryFiles: 1, diagnostic: 'incomplete-write' };
+  const notice = storageDiagnosticNotice(status);
+  assert.equal(storageLocationMode(status), 'blocked');
+  assert.equal(notice.kind, 'blocked');
+  assert.match(notice.message, /Создание нового хранилища заблокировано/);
+  assert.equal(notice.canOpenFolder, true);
+  assert.match(friendlyBackendError('unfinished vault write requires manual inspection before initialization'), /незавершённая запись/i);
+});
+
+test('unsafe filesystem objects fail closed without exposing paths or offering removal', () => {
+  const status = { state: 'error', diagnostic: 'unsafe-entry', path: 'private-path', contents: 'must-not-appear' };
+  const notice = storageDiagnosticNotice(status);
+  assert.equal(storageLocationMode(status), 'blocked');
+  assert.equal(notice.kind, 'blocked');
+  assert.equal(notice.canOpenFolder, true);
+  assert.doesNotMatch(JSON.stringify(notice), /private-path|must-not-appear|Удалить/);
+  assert.equal(storageDiagnosticNotice({ state: 'ready', temporaryFiles: 0 }), null);
+  assert.equal(storageDiagnosticNotice(null), null);
 });

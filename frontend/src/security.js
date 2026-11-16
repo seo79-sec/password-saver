@@ -85,6 +85,21 @@ export function storageLocationMode(status) {
   return 'blocked';
 }
 
+// Diagnostics describe filesystem metadata only. They never infer that an
+// active container or backup has authenticated successfully.
+export function storageDiagnosticNotice(status) {
+  if (status?.state === 'incomplete-write') {
+    return { kind: 'blocked', message: 'Обнаружены незавершённые служебные файлы без основного хранилища или резервной копии. Создание нового хранилища заблокировано. Сохраните копию папки для анализа; не переименовывайте служебный файл в основной контейнер.', canOpenFolder: true };
+  }
+  if (status?.diagnostic === 'unsafe-entry') {
+    return { kind: 'blocked', message: 'В папке хранилища обнаружен небезопасный или неизвестный объект. Вход и запись остановлены. Сохраните копию папки и проверьте её вручную, не переходя по подозрительным ссылкам.', canOpenFolder: true };
+  }
+  if (status?.temporaryFiles > 0 && status?.diagnostic === 'write-residue') {
+    return { kind: 'warning', message: 'После предыдущего завершения работы обнаружены незавершённые служебные файлы. Основное хранилище не изменено. Рекомендуется проверить резервную копию. Автоматическая очистка не выполняется.', canOpenFolder: true };
+  }
+  return null;
+}
+
 export function hasStorageBackup(status) {
   return status?.backupPresent === true;
 }
@@ -111,6 +126,9 @@ export function friendlyBackendError(error) {
   }
   if (/no space left|disk full|not enough space|ошибка 112/.test(message)) {
     return 'Недостаточно места для безопасной записи хранилища.';
+  }
+  if (/unfinished vault write/.test(message)) {
+    return 'Обнаружена незавершённая запись. Сохраните копию папки хранилища для анализа; создание нового хранилища заблокировано.';
   }
   if (/selected directory contains no vault files/.test(message)) {
     return 'В выбранной папке нет файлов хранилища PasswordSaver.';

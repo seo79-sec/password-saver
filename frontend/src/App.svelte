@@ -12,13 +12,14 @@
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, storageDiagnosticNotice, friendlyBackendError } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
   let isLoggedIn = false;
   let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
   let storageStatus = { state: 'loading', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false };
+  $: storageNotice = storageDiagnosticNotice(storageStatus);
   let loginFormat = 'v1';
   let setupMasterPassword = '';
   let setupConfirmPassword = '';
@@ -698,9 +699,16 @@
 
 <div class="app-background"></div>
 
-<main class="container">
+<main class="container" class:with-diagnostics={!!storageNotice}>
   {#if toastMessage}
     <div class="toast glass-panel" transition:fly={{ y: -20, duration: 300 }}>{toastMessage}</div>
+  {/if}
+
+  {#if storageNotice}
+    <section class="glass-panel storage-diagnostic" role="status">
+      <p class:warning-text={storageNotice.kind === 'warning'} class:error={storageNotice.kind === 'blocked'}>{storageNotice.message}</p>
+      {#if storageNotice.canOpenFolder}<button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку хранилища</button>{/if}
+    </section>
   {/if}
 
   {#if !isLoggedIn}
@@ -736,6 +744,8 @@
           <button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку AppData</button>
           {#if storageStatus.legacyPaths?.length}<button class="btn-secondary" on:click={() => openVaultFolder(true)}>Открыть старую папку</button>{/if}
         </div>
+      {:else if storageStatus.state === 'incomplete-write'}
+        <p class="error">Незавершённая запись требует проверки файлов. Временные файлы автоматически не открываются и не заменяют хранилище.</p>
       {:else if storageStatus.state === 'error'}
         <p class="error">Не удалось безопасно проверить каталог хранилища. Вход и создание отключены до устранения ошибки доступа или файловой системы.</p>
       {:else if vaultStatus.state === 'uninitialized'}
@@ -1104,6 +1114,8 @@
 </main>
 
 <style>
+  .container.with-diagnostics { flex-direction: column; align-items: center; justify-content: flex-start; }
+  .storage-diagnostic { width: 100%; max-width: 1000px; padding: 16px; margin-bottom: 16px; }
   /* --- CSS ПЕРЕМЕННЫЕ (СИСТЕМА ТЕМ) --- */
   :root {
     --bg-color: #0d1117;
