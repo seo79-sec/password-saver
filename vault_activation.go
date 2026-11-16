@@ -51,6 +51,7 @@ type vaultSelectorRecord struct {
 	SourceV1SHA256    string            `json:"sourceV1Sha256,omitempty"`
 	PreparedV2SHA256  string            `json:"preparedV2Sha256,omitempty"`
 	ActivatedV2SHA256 string            `json:"activatedV2Sha256,omitempty"`
+	NativeV2           bool              `json:"nativeV2,omitempty"`
 }
 
 type vaultSelection struct {
@@ -68,15 +69,19 @@ func validateVaultSelectorRecord(record vaultSelectorRecord) error {
 	}
 	switch record.Mode {
 	case selectorActiveV1:
-		if record.SourceV1SHA256 != "" || record.PreparedV2SHA256 != "" || record.ActivatedV2SHA256 != "" {
+		if record.SourceV1SHA256 != "" || record.PreparedV2SHA256 != "" || record.ActivatedV2SHA256 != "" || record.NativeV2 {
 			return ErrVaultSelectionAmbiguous
 		}
 	case selectorPreparedV2:
-		if !validSHA256Hex(record.SourceV1SHA256) || !validSHA256Hex(record.PreparedV2SHA256) || record.ActivatedV2SHA256 != "" {
+		if !validSHA256Hex(record.SourceV1SHA256) || !validSHA256Hex(record.PreparedV2SHA256) || record.ActivatedV2SHA256 != "" || record.NativeV2 {
 			return ErrVaultSelectionAmbiguous
 		}
 	case selectorActiveV2:
-		if !validSHA256Hex(record.SourceV1SHA256) || record.PreparedV2SHA256 != "" || !validSHA256Hex(record.ActivatedV2SHA256) {
+		// A native v2 vault has no v1 source; a migrated v2 vault must retain
+		// its source digest. This flag prevents accepting an ambiguous selector.
+		validSource := (record.NativeV2 && record.SourceV1SHA256 == "") ||
+			(!record.NativeV2 && validSHA256Hex(record.SourceV1SHA256))
+		if !validSource || record.PreparedV2SHA256 != "" || !validSHA256Hex(record.ActivatedV2SHA256) {
 			return ErrVaultSelectionAmbiguous
 		}
 	default:
