@@ -23,6 +23,9 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.selectedLegacyStorage.token != "" || a.storageSelectionDialogOpen || a.pendingStorageMigration.token != "" {
+		return ErrVaultStorageMigrationBusy
+	}
 	if a.cm != nil || a.v2Session != nil || a.vault != nil ||
 		a.pendingRecover.cm != nil || a.pendingV2Recover.session != nil {
 		return errors.New("close the current session before creating a vault")

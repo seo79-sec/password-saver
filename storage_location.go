@@ -45,6 +45,7 @@ const (
 )
 
 const storageMigrationReceiptFile = "storage.migration.json"
+const storageReceiptLimit = 16 * 1024
 
 type storageMigrationReceipt struct {
 	Format      string            `json:"format"`
@@ -75,6 +76,7 @@ type StorageLocationStatus struct {
 var storageOverrideMu sync.RWMutex
 var storageDirectoryOverride string
 var legacyDirectoryProvider = discoverLegacyVaultDirectories
+var storageExecutablePath = os.Executable
 
 func setStorageDirectoryOverrideForTest(path string) func() {
 	storageOverrideMu.Lock()
@@ -160,93 +162,6 @@ type vaultFileInventory struct {
 	Files         map[string][]byte
 }
 
-func inspectVaultFiles(directory string) (vaultFileInventory, error) {
-	var out = vaultFileInventory{Files: make(map[string][]byte)}
-	if strings.TrimSpace(directory) == "" || !filepath.IsAbs(directory) {
-		return out, ErrVaultDataLocation
-	}
-	if err := checkExistingPathComponents(directory); err != nil {
-		return vaultFileInventory{}, err
-	}
-	dirInfo, err := os.Lstat(directory)
-	if errors.Is(err, os.ErrNotExist) {
-		return out, nil
-	}
-	if err != nil {
-		return vaultFileInventory{}, fmt.Errorf("%w: cannot inspect vault directory", ErrVaultDataLocation)
-	}
-	if !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
-		return vaultFileInventory{}, ErrVaultStorageUnsafe
-	}
-	if reparse, err := storagePathIsReparsePoint(directory); err != nil || reparse {
-		return vaultFileInventory{}, ErrVaultStorageUnsafe
-	}
-	limits := map[string]int64{
-		dataFile:            maxVaultFileSize,
-		dataFile + ".bak":   maxVaultFileSize,
-		dataFileV2:          v2ContainerFileLimit(),
-		dataFileV2 + ".bak": v2ContainerFileLimit(),
-		vaultSelectorFile:   4096,
-	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return vaultFileInventory{}, fmt.Errorf("%w: cannot inspect vault directory entries", ErrVaultDataLocation)
-	}
-	for _, entry := range entries {
-		if _, known := limits[entry.Name()]; !known && entry.Name() != storageMigrationReceiptFile && !isVaultDiagnosticArchive(entry.Name()) {
-			return vaultFileInventory{}, ErrVaultStorageUnsafe
-		}
-	}
-	for _, entry := range entries {
-		if entry.Name() == storageMigrationReceiptFile || isVaultDiagnosticArchive(entry.Name()) {
-			path := filepath.Join(directory, entry.Name())
-			info, err := os.Lstat(path)
-			if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > maxVaultFileSize {
-				return vaultFileInventory{}, ErrVaultStorageUnsafe
-			}
-			if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
-				return vaultFileInventory{}, ErrVaultStorageUnsafe
-			}
-		}
-	}
-	for filename, limit := range limits {
-		path := filepath.Join(directory, filename)
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return vaultFileInventory{}, fmt.Errorf("%w: cannot inspect vault file", ErrVaultDataLocation)
-		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return vaultFileInventory{}, ErrVaultStorageUnsafe
-		}
-		if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
-			return vaultFileInventory{}, ErrVaultStorageUnsafe
-		}
-		if info.Size() < 0 || info.Size() > limit {
-			return vaultFileInventory{}, fmt.Errorf("%w: a vault file exceeds its size limit", ErrVaultDataLocation)
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return vaultFileInventory{}, fmt.Errorf("%w: cannot read vault file", ErrVaultDataLocation)
-		}
-		openedInfo, statErr := file.Stat()
-		if statErr != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
-			_ = file.Close()
-			return vaultFileInventory{}, ErrVaultStorageUnsafe
-		}
-		data, readErr := readLimited(file, limit)
-		closeErr := file.Close()
-		if readErr != nil || closeErr != nil {
-			return vaultFileInventory{}, fmt.Errorf("%w: cannot read vault file", ErrVaultDataLocation)
-		}
-		out.Files[filename] = data
-		out.HasVaultFiles = true
-	}
-	return out, nil
-}
-
 func isVaultDiagnosticArchive(name string) bool {
 	return strings.HasPrefix(name, dataFile+".corrupt-") || strings.HasPrefix(name, dataFileV2+".corrupt-")
 }
@@ -274,7 +189,7 @@ func inspectVaultLocationPlan(legacyDir, targetDir string) (vaultLocationPlan, e
 		current, err := inspectVaultFiles(targetDir)
 		return vaultLocationPlan{HasTargetVault: current.HasVaultFiles}, err
 	}
-	legacy, err := inspectVaultFiles(legacyDir)
+	legacy, err := inspectLegacyVaultFiles(legacyDir)
 	if err != nil {
 		return vaultLocationPlan{}, err
 	}
@@ -328,19 +243,12 @@ func inventoryHashes(inventory vaultFileInventory) map[string]string {
 	return hashes
 }
 
-func validStorageMigrationReceipt(directory, source string, sourceInventory, targetInventory vaultFileInventory) bool {
-	if !sourceInventory.HasVaultFiles || !targetInventory.HasVaultFiles || !filepath.IsAbs(source) {
+func validStorageMigrationReceipt(directory, source string, sourceInventory vaultFileInventory) bool {
+	if !sourceInventory.HasVaultFiles || !filepath.IsAbs(source) {
 		return false
 	}
 	path := filepath.Join(directory, storageMigrationReceiptFile)
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16*1024 {
-		return false
-	}
-	if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
-		return false
-	}
-	data, err := os.ReadFile(path)
+	data, err := readStorageFile(path, storageReceiptLimit)
 	if err != nil {
 		return false
 	}
@@ -374,12 +282,21 @@ func configuredStorageLocation() (storageLocation, error) {
 	return newStorageLocation(root)
 }
 
+// Routine route resolution reads filesystem metadata, not the active payload.
+// If both locations contain files, the receipt requires a full source hash
+// check. Do not cache that decision by path, size or mtime: a different vault
+// could have the same metadata. The target is authenticated by login/recovery
+// and its live revision is checked by the existing session save machinery.
 func discoverStorageRoute() (storageRoute, error) {
+	return discoverStorageRouteWithSource("")
+}
+
+func discoverStorageRouteWithSource(explicitSource string) (storageRoute, error) {
 	location, err := configuredStorageLocation()
 	if err != nil {
 		return storageRoute{}, err
 	}
-	target, err := inspectVaultFiles(location.Root)
+	target, err := scanVaultDirectory(location.Root, managedVaultDirectory)
 	if err != nil {
 		return storageRoute{}, err
 	}
@@ -387,42 +304,66 @@ func discoverStorageRoute() (storageRoute, error) {
 	if err != nil {
 		return storageRoute{}, err
 	}
+	if explicitSource != "" {
+		legacyCandidates = append(legacyCandidates, explicitSource)
+	}
 	legacyWithFiles := make([]string, 0, len(legacyCandidates))
-	legacyInventories := make([]vaultFileInventory, 0, len(legacyCandidates))
 	for _, candidate := range legacyCandidates {
-		inventory, err := inspectVaultFiles(candidate)
+		if sameStoragePath(candidate, location.Root) {
+			continue
+		}
+		duplicate := false
+		for _, previous := range legacyWithFiles {
+			if sameStoragePath(candidate, previous) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		files, err := scanVaultDirectory(candidate, legacyVaultDirectory)
 		if err != nil {
 			return storageRoute{}, err
 		}
-		if inventory.HasVaultFiles {
+		if len(files) > 0 {
 			legacyWithFiles = append(legacyWithFiles, candidate)
-			legacyInventories = append(legacyInventories, inventory)
 		}
 	}
+	route := storageRoute{Location: location, LegacyDirs: legacyWithFiles}
 	if len(legacyWithFiles) > 1 {
-		return storageRoute{Location: location, State: storageRouteConflict, LegacyDirs: legacyWithFiles}, nil
+		route.State = storageRouteConflict
+		return route, nil
 	}
-	if target.HasVaultFiles && len(legacyWithFiles) > 0 {
-		if len(legacyWithFiles) == 1 {
-			legacy := legacyInventories[0]
-			if validStorageMigrationReceipt(location.Root, legacyWithFiles[0], legacy, target) {
-				return storageRoute{Location: location, State: storageRouteReady, LegacyDirs: legacyWithFiles}, nil
+	if len(target) > 0 && len(legacyWithFiles) > 0 {
+		route.State = storageRouteConflict
+		// A manual import must never reuse/overwrite an existing target, even
+		// if a receipt identifies an earlier copy of the same source.
+		if _, receiptErr := statStorageFile(filepath.Join(location.Root, storageMigrationReceiptFile), storageReceiptLimit); explicitSource == "" && receiptErr == nil {
+			legacy, err := inspectLegacyVaultFiles(legacyWithFiles[0])
+			if err != nil {
+				return storageRoute{}, err
+			}
+			if validStorageMigrationReceipt(location.Root, legacyWithFiles[0], legacy) {
+				route.State = storageRouteReady
 			}
 		}
-		return storageRoute{Location: location, State: storageRouteConflict, LegacyDirs: legacyWithFiles}, nil
+		return route, nil
 	}
 	if len(legacyWithFiles) > 0 {
 		if err := requireEmptyDirectoryIfPresent(location.Root); err != nil {
-			return storageRoute{Location: location, State: storageRouteConflict, LegacyDirs: legacyWithFiles}, nil
+			route.State = storageRouteConflict
+			return route, nil
 		}
-		return storageRoute{Location: location, State: storageRouteNeedsMigration, LegacyDirs: legacyWithFiles, SourceDir: legacyWithFiles[0]}, nil
+		route.State, route.SourceDir = storageRouteNeedsMigration, legacyWithFiles[0]
+		return route, nil
 	}
-	return storageRoute{Location: location, State: storageRouteReady}, nil
+	return route, nil
 }
 
 func discoverLegacyVaultDirectories(target string) ([]string, error) {
 	var candidates []string
-	executable, err := os.Executable()
+	executable, err := storageExecutablePath()
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot determine executable directory", ErrVaultDataLocation)
 	}
@@ -432,7 +373,8 @@ func discoverLegacyVaultDirectories(target string) ([]string, error) {
 	}
 	// Do not scan the process working directory: a launcher may start the app
 	// from an unrelated path containing files with the same names. Only the
-	// executable's former data directory is a supported legacy location.
+	// executable directory is detected automatically. Other v2.0.0 working
+	// directories require the native, explicitly confirmed import flow.
 	for _, candidate := range []string{executableDir} {
 		candidate = filepath.Clean(candidate)
 		if sameStoragePath(candidate, target) {
@@ -575,9 +517,17 @@ func storageLocationStatus() StorageLocationStatus {
 		status.State = "migration-required"
 		status.MigrationPending = true
 		status.LegacyPaths = append([]string(nil), route.LegacyDirs...)
-		if source, sourceErr := inspectVaultFiles(route.SourceDir); sourceErr == nil {
+		if files, sourceErr := scanVaultDirectory(route.SourceDir, legacyVaultDirectory); sourceErr == nil {
+			// Only the small selector is needed for display. Vault bytes stay on disk.
+			source := vaultFileInventory{Files: make(map[string][]byte)}
+			for name := range files {
+				source.Files[name] = nil
+			}
+			if _, exists := files[vaultSelectorFile]; exists {
+				source.Files[vaultSelectorFile], _ = readStorageFile(filepath.Join(route.SourceDir, vaultSelectorFile), 4096)
+			}
 			status.Format = storageFormatFromInventory(source)
-			status.BackupPresent = len(source.Files[dataFile+".bak"]) > 0 || len(source.Files[dataFileV2+".bak"]) > 0
+			status.BackupPresent = files[dataFile+".bak"] != nil || files[dataFileV2+".bak"] != nil
 			if status.Format == "v2" {
 				status.Algorithm = "AES-256-GCM"
 			}
@@ -635,10 +585,14 @@ func storageFormatFromInventory(inventory vaultFileInventory) string {
 			}
 		}
 	}
-	if len(inventory.Files[dataFileV2]) > 0 || len(inventory.Files[dataFileV2+".bak"]) > 0 {
+	_, hasV2 := inventory.Files[dataFileV2]
+	_, hasV2Backup := inventory.Files[dataFileV2+".bak"]
+	if hasV2 || hasV2Backup {
 		return "unknown v2 candidate"
 	}
-	if len(inventory.Files[dataFile]) > 0 || len(inventory.Files[dataFile+".bak"]) > 0 {
+	_, hasV1 := inventory.Files[dataFile]
+	_, hasV1Backup := inventory.Files[dataFile+".bak"]
+	if hasV1 || hasV1Backup {
 		return "v1 (legacy)"
 	}
 	return "not initialized"

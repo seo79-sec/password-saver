@@ -21,23 +21,26 @@ import (
 
 // App struct управляет состоянием приложения и сессией в RAM
 type App struct {
-	mu                      sync.RWMutex
-	ctx                     context.Context
-	cm                      *crypto.CryptoManager
-	v2Session               *v2VaultSession
-	v2Engine                *cryptov2.Engine
-	v2Activation            *v2ActivationService
-	vault                   *Vault
-	twoFAVerified           bool // НОВОЕ: Флаг успешного прохождения 2FA
-	pendingReset            resetChallenge
-	pendingRecover          recoveryChallenge
-	pendingV2Recover        v2RecoveryChallenge
-	pendingStorageMigration storageMigrationChallenge
-	idleTimer               *time.Timer
-	idleTimeout             time.Duration
-	lastActivity            time.Time
-	totpFailures            int
-	totpBlockedUntil        time.Time
+	mu                         sync.RWMutex
+	ctx                        context.Context
+	cm                         *crypto.CryptoManager
+	v2Session                  *v2VaultSession
+	v2Engine                   *cryptov2.Engine
+	v2Activation               *v2ActivationService
+	vault                      *Vault
+	twoFAVerified              bool // НОВОЕ: Флаг успешного прохождения 2FA
+	pendingReset               resetChallenge
+	pendingRecover             recoveryChallenge
+	pendingV2Recover           v2RecoveryChallenge
+	pendingStorageMigration    storageMigrationChallenge
+	selectedLegacyStorage      legacyStorageSelection
+	storageSelectionGeneration uint64
+	storageSelectionDialogOpen bool
+	idleTimer                  *time.Timer
+	idleTimeout                time.Duration
+	lastActivity               time.Time
+	totpFailures               int
+	totpBlockedUntil           time.Time
 }
 
 type resetChallenge struct {
@@ -707,6 +710,7 @@ func (a *App) clearPendingChallengesLocked() {
 	a.clearPendingRecoveryLocked()
 	a.clearPendingV2RecoveryLocked()
 	a.clearPendingStorageMigrationLocked()
+	a.clearLegacyStorageSelectionLocked()
 }
 
 // --- ЛОГИКА ДВУХФАКТОРНОЙ АУТЕНТИФИКАЦИИ ---

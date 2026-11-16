@@ -12,9 +12,10 @@ func storageUserSecurityDescriptor(inheritable bool) (*windows.SECURITY_DESCRIPT
 	sid := user.User.Sid
 	inherit := ""
 	if inheritable {
-		inherit = ";OICI"
+		inherit = "OICI"
 	}
-	sddl := "O:" + sid.String() + "D:P(A" + inherit + ";FA;;;" + sid.String() + ")(A" + inherit + ";FA;;;SY)(A" + inherit + ";FA;;;BA)"
+	// ACE flags are a separate SDDL field, including when they are empty.
+	sddl := "O:" + sid.String() + "D:P(A;" + inherit + ";FA;;;" + sid.String() + ")(A;" + inherit + ";FA;;;SY)(A;" + inherit + ";FA;;;BA)"
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, nil, err

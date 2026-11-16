@@ -5,13 +5,14 @@
   import { 
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
     PrepareStorageLocationMigration, ConfirmStorageLocationMigration, CancelStorageLocationMigration,
+    SelectLegacyStorageDirectory, PrepareSelectedStorageLocationMigration, CancelLegacyStorageSelection,
     PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
     Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
@@ -22,6 +23,7 @@
   let setupMasterPassword = '';
   let setupConfirmPassword = '';
   let setupBusy = false;
+  let confirmNewVault = false;
   let masterPassword = '';
   let errorMessage = '';
   let lockReason = ''; 
@@ -54,6 +56,9 @@
   let storageMigrationPassword = '';
   let storageMigrationTotp = '';
   let storageMigrationToken = '';
+  let storageSelectionToken = '';
+  let storageMigrationSource = '';
+  let storageMigrationTarget = '';
   let storageMigrationBusy = false;
   let storageMigrationError = '';
 
@@ -209,7 +214,7 @@
     showMigrationModal = false; migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
-    recoveryBusy = false;
+    recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
@@ -238,7 +243,7 @@
     };
     document.addEventListener('visibilitychange', checkOnReturn);
     window.addEventListener('focus', checkOnReturn);
-    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); cancelBreachCheck(); clipboardController?.cancel(); };
+    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); closeStorageMigrationModal(); cancelBreachCheck(); clipboardController?.cancel(); };
   });
 
   let strengthColor = 'transparent';
@@ -269,7 +274,7 @@
 
   // --- ОБНОВЛЕННЫЕ ФУНКЦИИ ВХОДА (2FA) ---
   async function handleCreateV2() {
-    if (setupBusy || vaultStatus.state !== 'uninitialized') return;
+    if (setupBusy || !confirmNewVault || storageMigrationBusy || showStorageMigrationModal || vaultStatus.state !== 'uninitialized') return;
     if (setupMasterPassword.length < 12) {
       errorMessage = 'Мастер-пароль должен содержать минимум 12 символов.';
       return;
@@ -506,9 +511,33 @@
   }
 
   function openStorageMigrationModal() {
-    storageMigrationGeneration.advance();
-    storageMigrationStage = 'verify'; storageMigrationPassword = ''; storageMigrationTotp = '';
-    storageMigrationToken = ''; storageMigrationError = ''; showStorageMigrationModal = true;
+    closeStorageMigrationModal();
+    storageMigrationSource = storageStatus.legacyPaths?.[0] || '';
+    storageMigrationTarget = storageStatus.path;
+    showStorageMigrationModal = true;
+  }
+
+  async function selectExistingStorage() {
+    if (storageMigrationBusy || show2FAInput || setupBusy) return;
+    closeStorageMigrationModal();
+    confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
+    const generation = storageMigrationGeneration.capture();
+    storageMigrationBusy = true; errorMessage = '';
+    try {
+      await resolveCapabilityForGeneration(SelectLegacyStorageDirectory(), storageMigrationGeneration, generation,
+        result => result.token ? CancelLegacyStorageSelection(result.token) : Promise.resolve(),
+        result => {
+          if (!result.token) return; // native dialog cancellation
+          storageSelectionToken = result.token;
+          storageMigrationSource = result.path;
+          storageMigrationTarget = result.targetPath;
+          showStorageMigrationModal = true;
+        });
+    } catch (error) {
+      if (storageMigrationGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(error);
+    } finally {
+      if (storageMigrationGeneration.isCurrent(generation)) storageMigrationBusy = false;
+    }
   }
 
   async function prepareStorageLocationMigration() {
@@ -519,13 +548,16 @@
     const code = storageMigrationTotp;
     storageMigrationPassword = ''; storageMigrationTotp = '';
     try {
-      const token = await PrepareStorageLocationMigration(password, code);
-      if (!storageMigrationGeneration.isCurrent(generation) || !showStorageMigrationModal) {
-        CancelStorageLocationMigration(token).catch(() => {});
-        return;
-      }
-      storageMigrationToken = token;
-      storageMigrationStage = 'confirm';
+      const request = storageSelectionToken
+        ? PrepareSelectedStorageLocationMigration(storageSelectionToken, password, code)
+        : PrepareStorageLocationMigration(password, code);
+      await resolveCapabilityForGeneration(request, storageMigrationGeneration, generation,
+        token => CancelStorageLocationMigration(token),
+        token => {
+          storageSelectionToken = ''; // consumed by backend after authentication
+          storageMigrationToken = token;
+          storageMigrationStage = 'confirm';
+        });
     } catch (error) {
       if (storageMigrationGeneration.isCurrent(generation)) storageMigrationError = friendlyBackendError(error);
     } finally {
@@ -542,8 +574,7 @@
       await ConfirmStorageLocationMigration(token);
       if (!storageMigrationGeneration.isCurrent(generation)) return;
       storageMigrationToken = '';
-      showStorageMigrationModal = false;
-      storageMigrationPassword = ''; storageMigrationTotp = '';
+      closeStorageMigrationModal();
       await refreshVaultStatus();
     } catch (error) {
       if (storageMigrationGeneration.isCurrent(generation)) {
@@ -558,6 +589,8 @@
   function closeStorageMigrationModal() {
     storageMigrationGeneration.invalidate();
     if (storageMigrationToken) CancelStorageLocationMigration(storageMigrationToken).catch(() => {});
+    if (storageSelectionToken) CancelLegacyStorageSelection(storageSelectionToken).catch(() => {});
+    storageSelectionToken = ''; storageMigrationSource = ''; storageMigrationTarget = '';
     showStorageMigrationModal = false; storageMigrationStage = 'verify';
     storageMigrationPassword = ''; storageMigrationTotp = ''; storageMigrationToken = '';
     storageMigrationBusy = false; storageMigrationError = '';
@@ -715,11 +748,17 @@
         <p class="subtitle">Активное хранилище: {vaultStatus.state === 'v2-active' ? 'v2' : vaultStatus.state === 'v1-prepared' ? 'v1 (v2 подготовлен)' : 'v1'}</p>
       {/if}
 
+      {#if !show2FAInput && storageStatus.state !== 'loading'}
+        <button class="btn-secondary" disabled={storageMigrationBusy || setupBusy || showStorageMigrationModal} on:click={selectExistingStorage}>Не нашли своё хранилище? Указать расположение вручную</button>
+      {/if}
+
       {#if storageStatus.state === 'ready' && vaultStatus.state === 'uninitialized'}
+        <p class="warning-text">Ранее использовали PasswordSaver? Сначала укажите папку старого хранилища, включая рабочую папку ярлыка версии 2.0.0. Она не выбирается автоматически.</p>
+        <label class="check-container"><input type="checkbox" bind:checked={confirmNewVault} />Создать отдельное пустое хранилище; перенос сейчас не требуется</label>
         <div class="input-group" transition:fade>
           <input type="password" bind:value={setupMasterPassword} placeholder="Новый мастер-пароль (от 12 символов)" autocomplete="new-password" />
           <input type="password" bind:value={setupConfirmPassword} placeholder="Повторите мастер-пароль" autocomplete="new-password" on:keydown={(e) => e.key === 'Enter' && handleCreateV2()} />
-          <button class="btn-primary" disabled={setupBusy || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
+          <button class="btn-primary" disabled={setupBusy || !confirmNewVault || storageMigrationBusy || showStorageMigrationModal || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
         </div>
       {:else if storageStatus.state === 'ready' && loginModeForVaultStatus(vaultStatus) === 'blocked'}
         {#if vaultStatus.state === 'v1-prepared'}
@@ -987,8 +1026,8 @@
         {#if storageMigrationStage === 'verify'}
           <h3 class="dialog-title">Перенос в AppData</h3>
           <p class="dialog-message">Будут скопированы текущий зашифрованный контейнер, резервные копии и селектор формата. Приложение проверит активное хранилище мастер-паролем и TOTP, если он включён. Если основной файл повреждён, перенос разрешается только после проверки резервной копии; после копирования её восстановление остаётся отдельной подтверждаемой операцией. Исходные файлы останутся без изменений; перенос не удаляет и не объединяет данные.</p>
-          <p><strong>Источник:</strong><br><code>{storageStatus.legacyPaths?.[0]}</code></p>
-          <p><strong>Назначение:</strong><br><code>{storageStatus.path}</code></p>
+          <p><strong>Источник:</strong><br><code>{storageMigrationSource}</code></p>
+          <p><strong>Назначение:</strong><br><code>{storageMigrationTarget}</code></p>
           <label class="migration-label">Мастер-пароль
             <input type="password" bind:value={storageMigrationPassword} autocomplete="current-password" />
           </label>
@@ -1002,6 +1041,8 @@
           </div>
         {:else}
           <h3 class="dialog-title">Подтвердите копирование</h3>
+          <p><strong>Источник:</strong><br><code>{storageMigrationSource}</code></p>
+          <p><strong>Назначение:</strong><br><code>{storageMigrationTarget}</code></p>
           <p class="dialog-message">Аутентификация пройдена. PasswordSaver создаст зашифрованную копию в AppData, сверит каждый файл по байтам и только затем переключит приложение на неё. Старые файлы и пользовательские данные останутся в исходной папке. Подтверждение действует ограниченное время.</p>
           {#if storageMigrationError}<p class="error">{storageMigrationError}</p>{/if}
           <div class="dialog-buttons">

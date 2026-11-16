@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, hasStorageBackup, friendlyBackendError } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, hasStorageBackup, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -8,6 +8,47 @@ function deferred() {
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
+
+test('late native directory and migration tokens are cancelled after logout or modal close', async () => {
+  for (const result of [{ token: 'native-selection', path: 'synthetic-path' }, 'copy-token']) {
+    const guard = createGenerationGuard();
+    const response = deferred();
+    const cancelled = [];
+    let opened = false;
+    const pending = resolveCapabilityForGeneration(response.promise, guard, guard.capture(),
+      async value => cancelled.push(value), () => { opened = true; });
+    guard.invalidate(); // same invalidation used on logout, close and destroy
+    response.resolve(result);
+    assert.equal(await pending, false);
+    assert.equal(opened, false);
+    assert.deepEqual(cancelled, [result]);
+  }
+});
+
+test('current native selection opens verification; stale selection cannot replace a newer choice', async () => {
+  const guard = createGenerationGuard();
+  const oldResult = deferred();
+  const applied = [];
+  const cancelled = [];
+  const oldRequest = resolveCapabilityForGeneration(oldResult.promise, guard, guard.capture(),
+    async result => cancelled.push(result), result => applied.push(result));
+  guard.advance();
+  const current = { token: 'current-selection', path: 'synthetic-folder' };
+  assert.equal(await resolveCapabilityForGeneration(Promise.resolve(current), guard, guard.capture(),
+    async result => cancelled.push(result), result => applied.push(result)), true);
+  oldResult.resolve({ token: 'expired-selection' });
+  assert.equal(await oldRequest, false);
+  assert.deepEqual(applied, [current]);
+  assert.deepEqual(cancelled, [{ token: 'expired-selection' }]);
+});
+
+test('expired backend capability cancellation cannot revive a closed migration', async () => {
+  const guard = createGenerationGuard();
+  const generation = guard.capture();
+  guard.invalidate();
+  assert.equal(await resolveCapabilityForGeneration(Promise.resolve('expired'), guard, generation,
+    async () => { throw new Error('already expired'); }, () => assert.fail('stale result applied')), false);
+});
 
 test('clipboard cleanup only clears the password it originally copied', async () => {
   const writes = [];

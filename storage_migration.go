@@ -20,17 +20,19 @@ import (
 var storageMigrationChallengeLifetime = 2 * time.Minute
 
 type storageMigrationChallenge struct {
-	token     string
-	expires   time.Time
-	timer     *time.Timer
-	sourceDir string
-	targetDir string
-	files     map[string][]byte
+	token          string
+	expires        time.Time
+	timer          *time.Timer
+	sourceDir      string
+	explicitSource string
+	targetDir      string
+	files          map[string][]byte
 }
 
 var (
 	storageMigrationRenameDirectory = renameStorageDirectoryNoReplace
 	storageMigrationWriteFile       = writeFileAtomicNoReplace
+	storageMigrationSyncDirectory   = syncDirectory
 )
 
 // PrepareStorageLocationMigration verifies the currently selected encrypted
@@ -39,8 +41,14 @@ var (
 func (a *App) PrepareStorageLocationMigration(password, totpCode string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cm != nil || a.v2Session != nil || a.vault != nil || a.twoFAVerified ||
-		a.pendingRecover.cm != nil || a.pendingV2Recover.session != nil {
+	if a.selectedLegacyStorage.token != "" || a.storageSelectionDialogOpen {
+		return "", ErrVaultStorageMigrationBusy
+	}
+	return a.prepareStorageLocationMigrationLocked(password, totpCode, "")
+}
+
+func (a *App) prepareStorageLocationMigrationLocked(password, totpCode, explicitSource string) (string, error) {
+	if a.storageMigrationSessionLocked() {
 		return "", errors.New("заблокируйте хранилище и завершите текущую операцию перед переносом")
 	}
 	if a.pendingStorageMigration.token != "" {
@@ -49,7 +57,7 @@ func (a *App) PrepareStorageLocationMigration(password, totpCode string) (string
 	if err := a.checkTOTPAttemptsLocked(); err != nil {
 		return "", err
 	}
-	route, err := discoverStorageRoute()
+	route, err := discoverStorageRouteWithSource(explicitSource)
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +80,7 @@ func (a *App) PrepareStorageLocationMigration(password, totpCode string) (string
 	v2VaultFileMu.Lock()
 	defer v2VaultFileMu.Unlock()
 
-	latest, err := discoverStorageRoute()
+	latest, err := discoverStorageRouteWithSource(explicitSource)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +90,7 @@ func (a *App) PrepareStorageLocationMigration(password, totpCode string) (string
 		}
 		return "", ErrVaultStorageMigrationExpired
 	}
-	sourceInventory, err := inspectVaultFiles(route.SourceDir)
+	sourceInventory, err := inspectLegacyVaultFiles(route.SourceDir)
 	if err != nil || !sourceInventory.HasVaultFiles {
 		return "", ErrVaultStorageMigrationExpired
 	}
@@ -127,7 +135,7 @@ func (a *App) PrepareStorageLocationMigration(password, totpCode string) (string
 	expires := time.Now().Add(storageMigrationChallengeLifetime)
 	a.pendingStorageMigration = storageMigrationChallenge{
 		token: token, expires: expires, sourceDir: route.SourceDir,
-		targetDir: route.Location.Root, files: files,
+		targetDir: route.Location.Root, files: files, explicitSource: explicitSource,
 	}
 	a.pendingStorageMigration.timer = time.AfterFunc(time.Until(expires), func() {
 		a.mu.Lock()
@@ -146,7 +154,7 @@ var errStorageMigrationTOTP = errors.New("storage migration TOTP verification fa
 func (a *App) ConfirmStorageLocationMigration(token string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.cm != nil || a.v2Session != nil || a.vault != nil || a.twoFAVerified {
+	if a.storageMigrationSessionLocked() {
 		a.clearPendingStorageMigrationLocked()
 		return errors.New("перенос доступен только при полностью заблокированном хранилище")
 	}
@@ -172,7 +180,7 @@ func (a *App) ConfirmStorageLocationMigration(token string) error {
 	if err != nil {
 		return err
 	}
-	route, err := discoverStorageRoute()
+	route, err := discoverStorageRouteWithSource(pending.explicitSource)
 	if err != nil {
 		return err
 	}
@@ -231,10 +239,10 @@ func (a *App) ConfirmStorageLocationMigration(token string) error {
 		return fmt.Errorf("cannot stage migration receipt: %w", err)
 	}
 	staged, err := inspectVaultFiles(stageDir)
-	if err != nil || !sameInventory(sourceSnapshot, staged) || !validStorageMigrationReceipt(stageDir, pending.sourceDir, sourceSnapshot, staged) {
+	if err != nil || !sameInventory(sourceSnapshot, staged) || !validStorageMigrationReceipt(stageDir, pending.sourceDir, sourceSnapshot) {
 		return errors.New("staged encrypted copy failed byte verification")
 	}
-	if err := syncDirectory(stageDir); err != nil {
+	if err := storageMigrationSyncDirectory(stageDir); err != nil {
 		return fmt.Errorf("cannot synchronize staged vault directory: %w", err)
 	}
 	if err := ensureInventoryUnchanged(pending.sourceDir, sourceSnapshot); err != nil {
@@ -250,7 +258,7 @@ func (a *App) ConfirmStorageLocationMigration(token string) error {
 		return fmt.Errorf("cannot atomically publish migrated vault: %w", err)
 	}
 	committed = true
-	if err := syncDirectory(location.Vaults); err != nil {
+	if err := storageMigrationSyncDirectory(location.Vaults); err != nil {
 		return fmt.Errorf("%w: %v", ErrVaultStorageCommitUncertain, err)
 	}
 	return nil
@@ -315,11 +323,11 @@ func removeEmptyDirectoryIfPresent(path string) error {
 	if err := os.Remove(path); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return storageMigrationSyncDirectory(filepath.Dir(path))
 }
 
 func ensureInventoryUnchanged(directory string, expected vaultFileInventory) error {
-	current, err := inspectVaultFiles(directory)
+	current, err := inspectLegacyVaultFiles(directory)
 	if err != nil || !sameInventory(expected, current) {
 		return ErrVaultStorageMigrationExpired
 	}

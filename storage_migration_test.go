@@ -98,7 +98,7 @@ func newStorageMigrationFixture(t *testing.T, format string, vault *Vault) stora
 }
 
 func snapshotKnownVaultFiles(directory string) (map[string][]byte, error) {
-	inventory, err := inspectVaultFiles(directory)
+	inventory, err := inspectLegacyVaultFiles(directory)
 	if err != nil {
 		return nil, err
 	}

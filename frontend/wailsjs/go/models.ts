@@ -1,5 +1,21 @@
 export namespace main {
 
+    export class LegacyStorageSelection {
+        token: string;
+        path: string;
+        targetPath: string;
+
+        static createFrom(source: any = {}) { return new LegacyStorageSelection(source); }
+
+        constructor(source: any = {}) {
+            if ('string' === typeof source) source = JSON.parse(source);
+            this.token = source["token"];
+            this.path = source["path"];
+            this.targetPath = source["targetPath"];
+        }
+    }
+
+
 	export class Account {
 	    id: string;
 	    title: string;

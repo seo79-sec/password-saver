@@ -97,7 +97,7 @@ export function friendlyBackendError(error) {
   if (/password.*(12 characters|12 symbols|at least 12)|парол.*(12 символ|12 знак)/.test(message)) {
     return 'Для контейнера v2 нужен мастер-пароль не короче 12 символов. Исходное хранилище v1 осталось без изменений.';
   }
-  if (/неверный код 2fa|2fa verification failed|invalid.*totp/.test(message)) {
+  if (/неверный код 2fa|2fa verification failed|invalid.*totp|storage migration totp/.test(message)) {
     return 'Неверный код двухфакторной аутентификации.';
   }
   if (/activation challenge.*expired|confirmation.*expired|activation.*denied/.test(message)) {
@@ -111,6 +111,9 @@ export function friendlyBackendError(error) {
   }
   if (/no space left|disk full|not enough space|ошибка 112/.test(message)) {
     return 'Недостаточно места для безопасной записи хранилища.';
+  }
+  if (/selected directory contains no vault files/.test(message)) {
+    return 'В выбранной папке нет файлов хранилища PasswordSaver.';
   }
   if (/different vault files exist|storage.*conflict|conflict.*storage/.test(message)) {
     return 'Найдены разные копии хранилища. Приложение остановило вход и ничего не перезаписало.';
@@ -156,4 +159,16 @@ export function createClipboardController(clipboard, seconds, onError = () => {}
     },
     cancel() { generation++; clearTimeout(timer); },
   };
+}
+
+// Native directory choices and prepared migrations carry short-lived backend
+// capabilities. A late result must be cancelled, never applied to a new flow.
+export async function resolveCapabilityForGeneration(request, guard, generation, discard, apply) {
+  const result = await request;
+  if (!guard.isCurrent(generation)) {
+    try { await discard(result); } catch { /* expired/already cancelled */ }
+    return false;
+  }
+  apply(result);
+  return true;
 }

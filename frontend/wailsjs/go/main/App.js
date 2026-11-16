@@ -141,3 +141,15 @@ export function UpdateAccount(arg1, arg2, arg3, arg4) {
 export function Verify2FA(arg1) {
   return window['go']['main']['App']['Verify2FA'](arg1);
 }
+
+export function SelectLegacyStorageDirectory() {
+  return window['go']['main']['App']['SelectLegacyStorageDirectory']();
+}
+
+export function PrepareSelectedStorageLocationMigration(arg1, arg2, arg3) {
+  return window['go']['main']['App']['PrepareSelectedStorageLocationMigration'](arg1, arg2, arg3);
+}
+
+export function CancelLegacyStorageSelection(arg1) {
+  return window['go']['main']['App']['CancelLegacyStorageSelection'](arg1);
+}

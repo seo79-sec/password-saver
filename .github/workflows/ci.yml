@@ -70,6 +70,9 @@ jobs:
         working-directory: frontend
         run: npm test
 
+      - name: Test Go including Windows storage permissions and migration
+        run: go test ./...
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 

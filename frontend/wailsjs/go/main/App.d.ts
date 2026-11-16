@@ -71,3 +71,9 @@ export function TouchActivity():Promise<void>;
 export function UpdateAccount(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function Verify2FA(arg1:string):Promise<void>;
+
+export function SelectLegacyStorageDirectory():Promise<main.LegacyStorageSelection>;
+
+export function PrepareSelectedStorageLocationMigration(arg1:string,arg2:string,arg3:string):Promise<string>;
+
+export function CancelLegacyStorageSelection(arg1:string):Promise<void>;
