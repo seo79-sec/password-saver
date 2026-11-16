@@ -414,42 +414,54 @@
 
   async function prepareV2Migration() {
     if (migrationBusy) return;
+    const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     const password = migrationPassword;
     const code = migrationTotp;
     migrationPassword = ''; migrationTotp = '';
     try {
-      activationToken = await PrepareV2Migration(password, code);
+      const token = await PrepareV2Migration(password, code);
+      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      activationToken = token;
       migrationStage = 'activate';
       await refreshVaultStatus();
-    } catch (error) { migrationError = friendlyBackendError(error); }
-    finally { migrationBusy = false; }
+    } catch (error) {
+      if (sessionGeneration.isCurrent(sessionToken) && isLoggedIn) migrationError = friendlyBackendError(error);
+    } finally {
+      if (sessionGeneration.isCurrent(sessionToken)) migrationBusy = false;
+    }
   }
 
   async function confirmV2Migration() {
     if (migrationBusy || !activationToken) return;
+    const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     const password = activationPassword;
     const code = activationTotp;
     activationPassword = ''; activationTotp = '';
     try {
       await ConfirmV2Migration(activationToken, password, code);
+      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
       activationToken = '';
       showMigrationModal = false;
       clearSensitiveState('Хранилище обновлено до v2. Войдите повторно.');
       await refreshVaultStatus();
     } catch (error) {
+      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
       const message = friendlyBackendError(error);
       migrationError = message;
       activationToken = '';
       try {
         if (await IsLocked()) {
+          if (!sessionGeneration.isCurrent(sessionToken)) return;
           clearSensitiveState('');
           errorMessage = message;
         }
       } catch (_) {}
-      await refreshVaultStatus();
-    } finally { migrationBusy = false; }
+      if (sessionGeneration.isCurrent(sessionToken)) await refreshVaultStatus();
+    } finally {
+      if (sessionGeneration.isCurrent(sessionToken)) migrationBusy = false;
+    }
   }
 
   async function beginCancelV2Preparation() {
