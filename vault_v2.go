@@ -174,7 +174,11 @@ func SaveV2Vault(path string, engine *cryptov2.Engine, masterPassword string, va
 // MigrateV1VaultToV2 prepares vault_data.v2.enc while leaving vault_data.enc
 // and its .bak untouched. The v1 file remains the active application vault.
 func MigrateV1VaultToV2(masterPassword string, engine *cryptov2.Engine) error {
-	return migrateV1ToV2Paths(dataFile, dataFileV2, masterPassword, engine)
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
+	return migrateV1ToV2Paths(filepath.Join(directory, dataFile), filepath.Join(directory, dataFileV2), masterPassword, engine)
 }
 
 func migrateV1ToV2Paths(sourcePath, targetPath, masterPassword string, engine *cryptov2.Engine) error {
@@ -307,18 +311,25 @@ func ensurePathAbsent(path string) error {
 }
 
 func readV2File(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > cryptov2.MaxContainerSize {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > cryptov2.MaxContainerSize {
 		return nil, ErrVaultV2Corrupt
+	}
+	if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
+		return nil, ErrVaultStorageUnsafe
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+		return nil, ErrVaultStorageUnsafe
+	}
 	data, err := io.ReadAll(io.LimitReader(file, cryptov2.MaxContainerSize+1))
 	if err != nil {
 		return nil, err

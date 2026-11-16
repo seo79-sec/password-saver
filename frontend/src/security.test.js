@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, storageDiagnosticNotice, hasStorageBackup, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -8,6 +8,47 @@ function deferred() {
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
+
+test('late native directory and migration tokens are cancelled after logout or modal close', async () => {
+  for (const result of [{ token: 'native-selection', path: 'synthetic-path' }, 'copy-token']) {
+    const guard = createGenerationGuard();
+    const response = deferred();
+    const cancelled = [];
+    let opened = false;
+    const pending = resolveCapabilityForGeneration(response.promise, guard, guard.capture(),
+      async value => cancelled.push(value), () => { opened = true; });
+    guard.invalidate(); // same invalidation used on logout, close and destroy
+    response.resolve(result);
+    assert.equal(await pending, false);
+    assert.equal(opened, false);
+    assert.deepEqual(cancelled, [result]);
+  }
+});
+
+test('current native selection opens verification; stale selection cannot replace a newer choice', async () => {
+  const guard = createGenerationGuard();
+  const oldResult = deferred();
+  const applied = [];
+  const cancelled = [];
+  const oldRequest = resolveCapabilityForGeneration(oldResult.promise, guard, guard.capture(),
+    async result => cancelled.push(result), result => applied.push(result));
+  guard.advance();
+  const current = { token: 'current-selection', path: 'synthetic-folder' };
+  assert.equal(await resolveCapabilityForGeneration(Promise.resolve(current), guard, guard.capture(),
+    async result => cancelled.push(result), result => applied.push(result)), true);
+  oldResult.resolve({ token: 'expired-selection' });
+  assert.equal(await oldRequest, false);
+  assert.deepEqual(applied, [current]);
+  assert.deepEqual(cancelled, [{ token: 'expired-selection' }]);
+});
+
+test('expired backend capability cancellation cannot revive a closed migration', async () => {
+  const guard = createGenerationGuard();
+  const generation = guard.capture();
+  guard.invalidate();
+  assert.equal(await resolveCapabilityForGeneration(Promise.resolve('expired'), guard, generation,
+    async () => { throw new Error('already expired'); }, () => assert.fail('stale result applied')), false);
+});
 
 test('clipboard cleanup only clears the password it originally copied', async () => {
   const writes = [];
@@ -52,11 +93,21 @@ test('v2 backup recovery is offered only when v2 is active and backup exists', (
   assert.equal(canOfferV2BackupRecovery({ state: 'ambiguous', v2BackupPresent: true }), false);
 });
 
+test('storage location states distinguish migration, conflict, ready and blocked', () => {
+  assert.equal(storageLocationMode({ state: 'ready' }), 'ready');
+  assert.equal(storageLocationMode({ state: 'migration-required' }), 'migration');
+  assert.equal(storageLocationMode({ state: 'conflict' }), 'conflict');
+  assert.equal(storageLocationMode({ state: 'error' }), 'blocked');
+  assert.equal(hasStorageBackup({ backupPresent: true }), true);
+  assert.equal(hasStorageBackup({ backupPresent: false }), false);
+});
+
 test('backend errors are rendered as safe actionable messages', () => {
   assert.match(friendlyBackendError(new Error('v2 vault authentication failed')), /Мастер-пароль/);
   assert.match(friendlyBackendError('v2 activation challenge expired'), /истёк/);
   assert.match(friendlyBackendError('active v2 vault is missing'), /автоматически не открываются/);
   assert.match(friendlyBackendError('master password must be at least 12 characters'), /12 символов/);
+  assert.match(friendlyBackendError('different vault files exist in both locations'), /ничего не перезаписало/);
   assert.doesNotMatch(friendlyBackendError('unexpected secret-bearing error'), /unexpected secret-bearing error/);
 });
 
@@ -105,4 +156,38 @@ test('late HIBP response after abort is rejected and cannot commit UI state', as
   let applied = false;
   assert.equal(await resolveForGeneration(Promise.resolve([{ id: 'a', breached: true }]), generation, token, () => { applied = true; }), false);
   assert.equal(applied, false);
+});
+
+
+test('admissible write residue warns without blocking v1 or v2 login and backup recovery', () => {
+  const notice = storageDiagnosticNotice({ state: 'ready', temporaryFiles: 2, diagnostic: 'write-residue' });
+  assert.equal(notice.kind, 'warning');
+  assert.equal(notice.canOpenFolder, true);
+  assert.match(notice.message, /Основное хранилище не изменено/);
+  assert.match(notice.message, /Автоматическая очистка не выполняется/);
+  assert.equal(storageLocationMode({ state: 'ready' }), 'ready');
+  assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
+  assert.equal(loginModeForVaultStatus({ state: 'v1-active' }), 'v1');
+  assert.equal(canOfferV2BackupRecovery({ state: 'v2-active', v2BackupPresent: true }), true);
+});
+
+test('residue without a container is diagnostic and never enables setup', () => {
+  const status = { state: 'incomplete-write', temporaryFiles: 1, diagnostic: 'incomplete-write' };
+  const notice = storageDiagnosticNotice(status);
+  assert.equal(storageLocationMode(status), 'blocked');
+  assert.equal(notice.kind, 'blocked');
+  assert.match(notice.message, /Создание нового хранилища заблокировано/);
+  assert.equal(notice.canOpenFolder, true);
+  assert.match(friendlyBackendError('unfinished vault write requires manual inspection before initialization'), /незавершённая запись/i);
+});
+
+test('unsafe filesystem objects fail closed without exposing paths or offering removal', () => {
+  const status = { state: 'error', diagnostic: 'unsafe-entry', path: 'private-path', contents: 'must-not-appear' };
+  const notice = storageDiagnosticNotice(status);
+  assert.equal(storageLocationMode(status), 'blocked');
+  assert.equal(notice.kind, 'blocked');
+  assert.equal(notice.canOpenFolder, true);
+  assert.doesNotMatch(JSON.stringify(notice), /private-path|must-not-appear|Удалить/);
+  assert.equal(storageDiagnosticNotice({ state: 'ready', temporaryFiles: 0 }), null);
+  assert.equal(storageDiagnosticNotice(null), null);
 });

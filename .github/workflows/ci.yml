@@ -70,6 +70,20 @@ jobs:
         working-directory: frontend
         run: npm test
 
+      - name: Test Go including Windows storage permissions and migration
+        shell: pwsh
+        run: |
+          go test ./... 2>&1 | Tee-Object -Variable testOutput
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            # Keep individual failing tests visible in the PR checks summary,
+            # including when access to the full Actions logs is unavailable.
+            $failures = $testOutput | Select-String -Pattern '--- FAIL:|\s+\S+_test\.go:\d+:'
+            $message = ($failures -join "`n").Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows Go test failures::$message"
+          }
+          exit $testExit
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 

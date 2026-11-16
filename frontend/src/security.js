@@ -78,6 +78,32 @@ export function canOfferV2BackupRecovery(status) {
   return status?.state === 'v2-active' && status?.v2BackupPresent === true;
 }
 
+export function storageLocationMode(status) {
+  if (status?.state === 'ready') return 'ready';
+  if (status?.state === 'migration-required') return 'migration';
+  if (status?.state === 'conflict') return 'conflict';
+  return 'blocked';
+}
+
+// Diagnostics describe filesystem metadata only. They never infer that an
+// active container or backup has authenticated successfully.
+export function storageDiagnosticNotice(status) {
+  if (status?.state === 'incomplete-write') {
+    return { kind: 'blocked', message: 'Обнаружены незавершённые служебные файлы без основного хранилища или резервной копии. Создание нового хранилища заблокировано. Сохраните копию папки для анализа; не переименовывайте служебный файл в основной контейнер.', canOpenFolder: true };
+  }
+  if (status?.diagnostic === 'unsafe-entry') {
+    return { kind: 'blocked', message: 'В папке хранилища обнаружен небезопасный или неизвестный объект. Вход и запись остановлены. Сохраните копию папки и проверьте её вручную, не переходя по подозрительным ссылкам.', canOpenFolder: true };
+  }
+  if (status?.temporaryFiles > 0 && status?.diagnostic === 'write-residue') {
+    return { kind: 'warning', message: 'После предыдущего завершения работы обнаружены незавершённые служебные файлы. Основное хранилище не изменено. Рекомендуется проверить резервную копию. Автоматическая очистка не выполняется.', canOpenFolder: true };
+  }
+  return null;
+}
+
+export function hasStorageBackup(status) {
+  return status?.backupPresent === true;
+}
+
 export function friendlyBackendError(error) {
   const message = String(error?.message ?? error ?? '').toLowerCase();
   if (/authentication failed|incorrect .*master password|wrong.*password|неверный мастер-пароль/.test(message)) {
@@ -86,7 +112,7 @@ export function friendlyBackendError(error) {
   if (/password.*(12 characters|12 symbols|at least 12)|парол.*(12 символ|12 знак)/.test(message)) {
     return 'Для контейнера v2 нужен мастер-пароль не короче 12 символов. Исходное хранилище v1 осталось без изменений.';
   }
-  if (/неверный код 2fa|2fa verification failed|invalid.*totp/.test(message)) {
+  if (/неверный код 2fa|2fa verification failed|invalid.*totp|storage migration totp/.test(message)) {
     return 'Неверный код двухфакторной аутентификации.';
   }
   if (/activation challenge.*expired|confirmation.*expired|activation.*denied/.test(message)) {
@@ -100,6 +126,18 @@ export function friendlyBackendError(error) {
   }
   if (/no space left|disk full|not enough space|ошибка 112/.test(message)) {
     return 'Недостаточно места для безопасной записи хранилища.';
+  }
+  if (/unfinished vault write/.test(message)) {
+    return 'Обнаружена незавершённая запись. Сохраните копию папки хранилища для анализа; создание нового хранилища заблокировано.';
+  }
+  if (/selected directory contains no vault files/.test(message)) {
+    return 'В выбранной папке нет файлов хранилища PasswordSaver.';
+  }
+  if (/different vault files exist|storage.*conflict|conflict.*storage/.test(message)) {
+    return 'Найдены разные копии хранилища. Приложение остановило вход и ничего не перезаписало.';
+  }
+  if (/explicitly moved|storage migration.*expired|storage.*changed/.test(message)) {
+    return 'Перенос хранилища не завершён или подтверждение истекло. Исходная копия сохранена; начните проверку заново.';
   }
   if (/ambiguous|selector state is damaged|unknown.*format/.test(message)) {
     return 'Состояние формата хранилища повреждено или неоднозначно. Автоматического перехода между форматами не будет.';
@@ -139,4 +177,16 @@ export function createClipboardController(clipboard, seconds, onError = () => {}
     },
     cancel() { generation++; clearTimeout(timer); },
   };
+}
+
+// Native directory choices and prepared migrations carry short-lived backend
+// capabilities. A late result must be cancelled, never applied to a new flow.
+export async function resolveCapabilityForGeneration(request, guard, generation, discard, apply) {
+  const result = await request;
+  if (!guard.isCurrent(generation)) {
+    try { await discard(result); } catch { /* expired/already cancelled */ }
+    return false;
+  }
+  apply(result);
+  return true;
 }

@@ -3,22 +3,28 @@
   import { fade, slide, fly } from 'svelte/transition';
   import { flip } from 'svelte/animate';
   import { 
-    Login, LoginV2, CreateV2Vault, GetVaultStatus, PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
+    Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
+    PrepareStorageLocationMigration, ConfirmStorageLocationMigration, CancelStorageLocationMigration,
+    SelectLegacyStorageDirectory, PrepareSelectedStorageLocationMigration, CancelLegacyStorageSelection,
+    PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
     Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, storageDiagnosticNotice, friendlyBackendError } from './security.js';
 
   import logoImg from './assets/images/logo.png';
 
   let isLoggedIn = false;
   let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
+  let storageStatus = { state: 'loading', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false };
+  $: storageNotice = storageDiagnosticNotice(storageStatus);
   let loginFormat = 'v1';
   let setupMasterPassword = '';
   let setupConfirmPassword = '';
   let setupBusy = false;
+  let confirmNewVault = false;
   let masterPassword = '';
   let errorMessage = '';
   let lockReason = ''; 
@@ -46,6 +52,17 @@
   let migrationBusy = false;
   let migrationError = '';
 
+  let showStorageMigrationModal = false;
+  let storageMigrationStage = 'verify';
+  let storageMigrationPassword = '';
+  let storageMigrationTotp = '';
+  let storageMigrationToken = '';
+  let storageSelectionToken = '';
+  let storageMigrationSource = '';
+  let storageMigrationTarget = '';
+  let storageMigrationBusy = false;
+  let storageMigrationError = '';
+
   // --- ЛОГИКА 2FA ---
   let show2FAInput = false; 
   let twoFACode = '';
@@ -61,6 +78,7 @@
   let lastActivitySent = 0;
   const sessionGeneration = createGenerationGuard();
   const breachGeneration = createGenerationGuard();
+  const storageMigrationGeneration = createGenerationGuard();
   let breachController;
   
   // --- ЛОГИКА ТЕМЫ ---
@@ -196,7 +214,8 @@
     showAbout = false; dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
     showMigrationModal = false; migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
-    recoveryBusy = false;
+    closeStorageMigrationModal();
+    recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
@@ -225,7 +244,7 @@
     };
     document.addEventListener('visibilitychange', checkOnReturn);
     window.addEventListener('focus', checkOnReturn);
-    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); cancelBreachCheck(); clipboardController?.cancel(); };
+    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); closeStorageMigrationModal(); cancelBreachCheck(); clipboardController?.cancel(); };
   });
 
   let strengthColor = 'transparent';
@@ -256,7 +275,7 @@
 
   // --- ОБНОВЛЕННЫЕ ФУНКЦИИ ВХОДА (2FA) ---
   async function handleCreateV2() {
-    if (setupBusy || vaultStatus.state !== 'uninitialized') return;
+    if (setupBusy || !confirmNewVault || storageMigrationBusy || showStorageMigrationModal || vaultStatus.state !== 'uninitialized') return;
     if (setupMasterPassword.length < 12) {
       errorMessage = 'Мастер-пароль должен содержать минимум 12 символов.';
       return;
@@ -486,8 +505,106 @@
   }
 
   async function refreshVaultStatus() {
+    try { storageStatus = await GetStorageLocationStatus(); }
+    catch (error) { storageStatus = { state: 'error', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false }; console.error(error); }
     try { vaultStatus = await GetVaultStatus(); }
     catch (error) { vaultStatus = { state: 'ambiguous', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false }; console.error(error); }
+  }
+
+  function openStorageMigrationModal() {
+    closeStorageMigrationModal();
+    storageMigrationSource = storageStatus.legacyPaths?.[0] || '';
+    storageMigrationTarget = storageStatus.path;
+    showStorageMigrationModal = true;
+  }
+
+  async function selectExistingStorage() {
+    if (storageMigrationBusy || show2FAInput || setupBusy) return;
+    closeStorageMigrationModal();
+    confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
+    const generation = storageMigrationGeneration.capture();
+    storageMigrationBusy = true; errorMessage = '';
+    try {
+      await resolveCapabilityForGeneration(SelectLegacyStorageDirectory(), storageMigrationGeneration, generation,
+        result => result.token ? CancelLegacyStorageSelection(result.token) : Promise.resolve(),
+        result => {
+          if (!result.token) return; // native dialog cancellation
+          storageSelectionToken = result.token;
+          storageMigrationSource = result.path;
+          storageMigrationTarget = result.targetPath;
+          showStorageMigrationModal = true;
+        });
+    } catch (error) {
+      if (storageMigrationGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(error);
+    } finally {
+      if (storageMigrationGeneration.isCurrent(generation)) storageMigrationBusy = false;
+    }
+  }
+
+  async function prepareStorageLocationMigration() {
+    if (storageMigrationBusy || !storageMigrationPassword) return;
+    const generation = storageMigrationGeneration.capture();
+    storageMigrationBusy = true; storageMigrationError = '';
+    const password = storageMigrationPassword;
+    const code = storageMigrationTotp;
+    storageMigrationPassword = ''; storageMigrationTotp = '';
+    try {
+      const request = storageSelectionToken
+        ? PrepareSelectedStorageLocationMigration(storageSelectionToken, password, code)
+        : PrepareStorageLocationMigration(password, code);
+      await resolveCapabilityForGeneration(request, storageMigrationGeneration, generation,
+        token => CancelStorageLocationMigration(token),
+        token => {
+          storageSelectionToken = ''; // consumed by backend after authentication
+          storageMigrationToken = token;
+          storageMigrationStage = 'confirm';
+        });
+    } catch (error) {
+      if (storageMigrationGeneration.isCurrent(generation)) storageMigrationError = friendlyBackendError(error);
+    } finally {
+      if (storageMigrationGeneration.isCurrent(generation)) storageMigrationBusy = false;
+    }
+  }
+
+  async function confirmStorageLocationMigration() {
+    if (storageMigrationBusy || !storageMigrationToken) return;
+    const generation = storageMigrationGeneration.capture();
+    const token = storageMigrationToken;
+    storageMigrationBusy = true; storageMigrationError = '';
+    try {
+      await ConfirmStorageLocationMigration(token);
+      if (!storageMigrationGeneration.isCurrent(generation)) return;
+      storageMigrationToken = '';
+      closeStorageMigrationModal();
+      await refreshVaultStatus();
+    } catch (error) {
+      if (storageMigrationGeneration.isCurrent(generation)) {
+        storageMigrationError = friendlyBackendError(error);
+        await refreshVaultStatus();
+      }
+    } finally {
+      if (storageMigrationGeneration.isCurrent(generation)) storageMigrationBusy = false;
+    }
+  }
+
+  function closeStorageMigrationModal() {
+    storageMigrationGeneration.invalidate();
+    if (storageMigrationToken) CancelStorageLocationMigration(storageMigrationToken).catch(() => {});
+    if (storageSelectionToken) CancelLegacyStorageSelection(storageSelectionToken).catch(() => {});
+    storageSelectionToken = ''; storageMigrationSource = ''; storageMigrationTarget = '';
+    showStorageMigrationModal = false; storageMigrationStage = 'verify';
+    storageMigrationPassword = ''; storageMigrationTotp = ''; storageMigrationToken = '';
+    storageMigrationBusy = false; storageMigrationError = '';
+  }
+
+  async function openVaultFolder(legacy = false) {
+    try {
+      if (legacy) await OpenLegacyStorageFolder();
+      else await OpenStorageFolder();
+    } catch (error) {
+      toastMessage = 'Не удалось открыть папку хранилища';
+      setTimeout(() => toastMessage = '', 3500);
+    }
   }
 
   function openMigrationModal() {
@@ -582,9 +699,16 @@
 
 <div class="app-background"></div>
 
-<main class="container">
+<main class="container" class:with-diagnostics={!!storageNotice}>
   {#if toastMessage}
     <div class="toast glass-panel" transition:fly={{ y: -20, duration: 300 }}>{toastMessage}</div>
+  {/if}
+
+  {#if storageNotice}
+    <section class="glass-panel storage-diagnostic" role="status">
+      <p class:warning-text={storageNotice.kind === 'warning'} class:error={storageNotice.kind === 'blocked'}>{storageNotice.message}</p>
+      {#if storageNotice.canOpenFolder}<button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку хранилища</button>{/if}
+    </section>
   {/if}
 
   {#if !isLoggedIn}
@@ -601,8 +725,29 @@
         <p class="lock-warning" transition:slide>🔒 {lockReason}</p>
       {/if}
 
-      {#if vaultStatus.state === 'loading'}
+      {#if storageStatus.state === 'loading'}
         <p class="subtitle">Проверка состояния хранилища…</p>
+      {:else if storageStatus.state === 'migration-required'}
+        <div class="storage-route-panel">
+          <p class="warning-text">Найдено старое зашифрованное хранилище. Перед переносом потребуется проверить мастер-пароль и код TOTP, если он включён. Копия будет проверена по байтам; исходные файлы останутся на месте.</p>
+          <p><strong>Старое расположение:</strong><br><code>{storageStatus.legacyPaths?.[0]}</code></p>
+          <p><strong>Новое расположение:</strong><br><code>{storageStatus.path}</code></p>
+          <p>Формат: {storageStatus.format || 'не определён'}; резервная копия: {storageStatus.backupPresent ? 'есть' : 'нет'}.</p>
+          <button class="btn-primary" on:click={openStorageMigrationModal}>Проверить и перенести зашифрованное хранилище</button>
+          <button class="btn-secondary" on:click={() => openVaultFolder(true)}>Открыть старую папку</button>
+        </div>
+      {:else if storageStatus.state === 'conflict'}
+        <div class="storage-route-panel">
+          <p class="error">Найдены файлы хранилища в нескольких расположениях. PasswordSaver ничего не выбрал и не перезаписал. Разрешите конфликт вручную, сохранив обе копии.</p>
+          <p><strong>AppData:</strong><br><code>{storageStatus.path}</code></p>
+          {#each storageStatus.legacyPaths || [] as path}<p><strong>Старое расположение:</strong><br><code>{path}</code></p>{/each}
+          <button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку AppData</button>
+          {#if storageStatus.legacyPaths?.length}<button class="btn-secondary" on:click={() => openVaultFolder(true)}>Открыть старую папку</button>{/if}
+        </div>
+      {:else if storageStatus.state === 'incomplete-write'}
+        <p class="error">Незавершённая запись требует проверки файлов. Временные файлы автоматически не открываются и не заменяют хранилище.</p>
+      {:else if storageStatus.state === 'error'}
+        <p class="error">Не удалось безопасно проверить каталог хранилища. Вход и создание отключены до устранения ошибки доступа или файловой системы.</p>
       {:else if vaultStatus.state === 'uninitialized'}
         <p class="subtitle">Создайте новое хранилище v2 (AES-256-GCM).</p>
       {:else if vaultStatus.state === 'ambiguous'}
@@ -613,23 +758,29 @@
         <p class="subtitle">Активное хранилище: {vaultStatus.state === 'v2-active' ? 'v2' : vaultStatus.state === 'v1-prepared' ? 'v1 (v2 подготовлен)' : 'v1'}</p>
       {/if}
 
-      {#if vaultStatus.state === 'uninitialized'}
+      {#if !show2FAInput && storageStatus.state !== 'loading'}
+        <button class="btn-secondary" disabled={storageMigrationBusy || setupBusy || showStorageMigrationModal} on:click={selectExistingStorage}>Не нашли своё хранилище? Указать расположение вручную</button>
+      {/if}
+
+      {#if storageStatus.state === 'ready' && vaultStatus.state === 'uninitialized'}
+        <p class="warning-text">Ранее использовали PasswordSaver? Сначала укажите папку старого хранилища, включая рабочую папку ярлыка версии 2.0.0. Она не выбирается автоматически.</p>
+        <label class="check-container"><input type="checkbox" bind:checked={confirmNewVault} />Создать отдельное пустое хранилище; перенос сейчас не требуется</label>
         <div class="input-group" transition:fade>
           <input type="password" bind:value={setupMasterPassword} placeholder="Новый мастер-пароль (от 12 символов)" autocomplete="new-password" />
           <input type="password" bind:value={setupConfirmPassword} placeholder="Повторите мастер-пароль" autocomplete="new-password" on:keydown={(e) => e.key === 'Enter' && handleCreateV2()} />
-          <button class="btn-primary" disabled={setupBusy || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
+          <button class="btn-primary" disabled={setupBusy || !confirmNewVault || storageMigrationBusy || showStorageMigrationModal || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
         </div>
-      {:else if loginModeForVaultStatus(vaultStatus) === 'blocked'}
+      {:else if storageStatus.state === 'ready' && loginModeForVaultStatus(vaultStatus) === 'blocked'}
         {#if vaultStatus.state === 'v1-prepared'}
           <p class="warning-text">Незавершённую подготовку можно безопасно отменить. Файлы при отмене сохраняются.</p>
           <button class="btn-secondary" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>
         {/if}
-      {:else if !show2FAInput}
+      {:else if storageStatus.state === 'ready' && !show2FAInput && loginModeForVaultStatus(vaultStatus) !== 'blocked'}
         <div class="input-group" transition:fade>
           <input type="password" bind:value={masterPassword} placeholder="Введите мастер-пароль" autocomplete="current-password" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
           <button class="btn-primary" disabled={vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
         </div>
-      {:else}
+      {:else if storageStatus.state === 'ready' && show2FAInput}
         <div class="input-group" transition:fly={{ y: 20 }}>
           <p class="accent-text" style="margin: 0; font-size: 0.9rem;">Включена двухфакторная защита</p>
           <input type="text" bind:value={twoFACode} placeholder="Введите 6-значный код TOTP" maxlength="6" style="text-align: center; letter-spacing: 4px; font-size: 1.2rem;" on:keydown={(e) => e.key === 'Enter' && handleVerify2FA()}/>
@@ -638,7 +789,7 @@
         </div>
       {/if}
 
-      {#if canOfferV2BackupRecovery(vaultStatus) && !show2FAInput}
+      {#if storageStatus.state === 'ready' && canOfferV2BackupRecovery(vaultStatus) && !show2FAInput}
         <button class="btn-secondary" disabled={recoveryBusy} on:click={handleV2Recovery}>
           {recoveryBusy ? 'Проверка резервной копии…' : 'Восстановить из резервной копии v2'}
         </button>
@@ -648,7 +799,7 @@
         <p class="error" transition:slide>{errorMessage}</p>
       {/if}
 
-      {#if vaultStatus.state === 'v1-active'}
+      {#if storageStatus.state === 'ready' && vaultStatus.state === 'v1-active'}
         <div class="reset-zone">
           <button class="btn-outline-danger" on:click={handleReset}>Сбросить хранилище (Удалить всё)</button>
         </div>
@@ -668,6 +819,19 @@
           <button class="btn-lock" on:click={() => handleLogout('Хранилище заблокировано вручную')}>🔒 Заблокировать хранилище</button>
         </div>
       </div>
+
+      <section class="settings-panel storage-location-panel">
+        <div>
+          <strong>Хранилище данных</strong>
+          <div class="storage-location-details">
+            <span>Расположение: <code>{storageStatus.path}</code></span>
+            <span>Формат: {storageStatus.format || 'не определён'}</span>
+            <span>Алгоритм: {storageStatus.algorithm || (storageStatus.format?.startsWith('v1') ? 'legacy' : '—')}</span>
+            <span>Резервная копия: {storageStatus.backupPresent ? 'есть' : 'нет'}</span>
+          </div>
+        </div>
+        <button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку хранилища</button>
+      </section>
 
       <section class="settings-panel vault-format-panel">
         <div>
@@ -865,6 +1029,41 @@
     </div>
   {/if}
 
+  {#if showStorageMigrationModal}
+    <div class="modal-overlay" role="presentation" transition:fade on:click|self={closeStorageMigrationModal}>
+      <div class="modal-content glass-panel migration-modal" transition:fly={{y: 20}}>
+        <button class="close-btn" disabled={storageMigrationBusy} on:click={closeStorageMigrationModal}>✖</button>
+        {#if storageMigrationStage === 'verify'}
+          <h3 class="dialog-title">Перенос в AppData</h3>
+          <p class="dialog-message">Будут скопированы текущий зашифрованный контейнер, резервные копии и селектор формата. Приложение проверит активное хранилище мастер-паролем и TOTP, если он включён. Если основной файл повреждён, перенос разрешается только после проверки резервной копии; после копирования её восстановление остаётся отдельной подтверждаемой операцией. Исходные файлы останутся без изменений; перенос не удаляет и не объединяет данные.</p>
+          <p><strong>Источник:</strong><br><code>{storageMigrationSource}</code></p>
+          <p><strong>Назначение:</strong><br><code>{storageMigrationTarget}</code></p>
+          <label class="migration-label">Мастер-пароль
+            <input type="password" bind:value={storageMigrationPassword} autocomplete="current-password" />
+          </label>
+          <label class="migration-label">Код TOTP, если включена 2FA
+            <input type="text" bind:value={storageMigrationTotp} inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+          </label>
+          {#if storageMigrationError}<p class="error">{storageMigrationError}</p>{/if}
+          <div class="dialog-buttons">
+            <button class="btn-cancel" disabled={storageMigrationBusy} on:click={closeStorageMigrationModal}>Отмена</button>
+            <button class="submit-btn" disabled={storageMigrationBusy || !storageMigrationPassword} on:click={prepareStorageLocationMigration}>{storageMigrationBusy ? 'Проверка…' : 'Проверить хранилище'}</button>
+          </div>
+        {:else}
+          <h3 class="dialog-title">Подтвердите копирование</h3>
+          <p><strong>Источник:</strong><br><code>{storageMigrationSource}</code></p>
+          <p><strong>Назначение:</strong><br><code>{storageMigrationTarget}</code></p>
+          <p class="dialog-message">Аутентификация пройдена. PasswordSaver создаст зашифрованную копию в AppData, сверит каждый файл по байтам и только затем переключит приложение на неё. Старые файлы и пользовательские данные останутся в исходной папке. Подтверждение действует ограниченное время.</p>
+          {#if storageMigrationError}<p class="error">{storageMigrationError}</p>{/if}
+          <div class="dialog-buttons">
+            <button class="btn-cancel" disabled={storageMigrationBusy} on:click={closeStorageMigrationModal}>Не переносить</button>
+            <button class="submit-btn" disabled={storageMigrationBusy || !storageMigrationToken} on:click={confirmStorageLocationMigration}>{storageMigrationBusy ? 'Копирование…' : 'Подтвердить копирование'}</button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if show2FASetupModal}
     <div class="modal-overlay" transition:fade on:click|self={close2FASetup}>
       <div class="modal-content glass-panel" style="text-align: center; max-width: 400px;" transition:fly={{y: 20}}>
@@ -915,6 +1114,8 @@
 </main>
 
 <style>
+  .container.with-diagnostics { flex-direction: column; align-items: center; justify-content: flex-start; }
+  .storage-diagnostic { width: 100%; max-width: 1000px; padding: 16px; margin-bottom: 16px; }
   /* --- CSS ПЕРЕМЕННЫЕ (СИСТЕМА ТЕМ) --- */
   :root {
     --bg-color: #0d1117;
@@ -1046,6 +1247,10 @@
   .settings-panel select { height: 34px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-main); border-radius: 6px; padding: 4px 8px; }
   .vault-format-panel { align-items: center; justify-content: space-between; }
   .vault-format-panel .subtitle { margin: 8px 0 0; }
+  .storage-location-panel { align-items: center; justify-content: space-between; }
+  .storage-location-details { display: grid; gap: 5px; margin-top: 10px; color: var(--text-muted); font-size: .9rem; }
+  .storage-location-details code, .storage-route-panel code { overflow-wrap: anywhere; color: var(--text-main); }
+  .storage-route-panel { display: grid; gap: 10px; margin: 15px 0; text-align: left; }
   .vault-format-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .warning-text { color: #e3b341; font-size: .9rem; line-height: 1.45; }
 

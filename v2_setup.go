@@ -23,6 +23,9 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if a.selectedLegacyStorage.token != "" || a.storageSelectionDialogOpen || a.pendingStorageMigration.token != "" {
+		return ErrVaultStorageMigrationBusy
+	}
 	if a.cm != nil || a.v2Session != nil || a.vault != nil ||
 		a.pendingRecover.cm != nil || a.pendingV2Recover.session != nil {
 		return errors.New("close the current session before creating a vault")
@@ -36,13 +39,28 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 		return cryptov2.ErrPasswordTooShort
 	}
 
-	paths := vaultPaths(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
+	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
 	v2VaultFileMu.Lock()
 	defer v2VaultFileMu.Unlock()
+
+	// Recheck under the write locks; route discovery alone is not the final
+	// initialization guard. Residue can be an interrupted first container or
+	// selector publication and must never be treated as an empty directory.
+	scan, err := scanVaultDirectoryDetails(directory, managedVaultDirectory)
+	if err != nil {
+		return err
+	}
+	if scan.TemporaryFiles > 0 {
+		return ErrVaultStorageIncomplete
+	}
 
 	for _, path := range []string{paths.selector, paths.v1, paths.v1 + ".bak", paths.v2, paths.v2 + ".bak"} {
 		exists, err := pathExists(path)
@@ -94,10 +112,10 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 	}
 	wipeVault(checkedBackup)
 	record := vaultSelectorRecord{
-		Format: "passwordsaver-vault-selector",
-		Version: 1,
-		Mode: selectorActiveV2,
-		NativeV2: true,
+		Format:            "passwordsaver-vault-selector",
+		Version:           1,
+		Mode:              selectorActiveV2,
+		NativeV2:          true,
 		ActivatedV2SHA256: digestHex(container),
 	}
 	if err := validateVaultSelectorRecord(record); err != nil {

@@ -49,7 +49,11 @@ var hmacSecret = []byte("PasswordSaver_MTUSI_SecureKey_2026")
 // SaveVault шифрует данные и заменяет контейнер атомарно. Перед заменой сохраняется
 // предыдущий зашифрованный контейнер в vault_data.enc.bak.
 func SaveVault(cm *crypto.CryptoManager, v *Vault) error {
-	return saveVaultToPath(dataFile, cm, v)
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
+	return saveVaultToPath(filepath.Join(directory, dataFile), cm, v)
 }
 
 func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
@@ -82,11 +86,7 @@ func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
 	finalData := append(filePayload, signature...)
 
 	// Backup только шифротекста; plaintext в резервную копию не попадает.
-	previousInfo, err := os.Stat(path)
-	if err == nil && previousInfo.Size() > maxVaultFileSize {
-		return errors.New("текущий файл хранилища превышает допустимый размер")
-	}
-	previous, err := os.ReadFile(path)
+	previous, err := readVaultFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -134,9 +134,18 @@ func writeFileAtomic(path string, data []byte) error {
 
 // LoadVault читает файл, проверяет целостность по HMAC и расшифровывает пароли
 func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return nil, err
+	}
+	return loadVaultAtDirectory(cm, directory)
+}
+
+func loadVaultAtDirectory(cm *crypto.CryptoManager, directory string) (*Vault, error) {
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
-	v, primaryErr := loadVaultFromPath(cm, dataFile)
+	primaryPath := filepath.Join(directory, dataFile)
+	v, primaryErr := loadVaultFromPath(cm, primaryPath)
 	if primaryErr == nil {
 		return v, nil
 	}
@@ -144,7 +153,7 @@ func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
 		return nil, primaryErr
 	}
 
-	_, backupErr := loadVaultFromPath(cm, dataFile+".bak")
+	_, backupErr := loadVaultFromPath(cm, primaryPath+".bak")
 	if backupErr == nil {
 		return nil, errVaultRecoveryAvailable
 	}
@@ -156,18 +165,25 @@ func LoadVault(cm *crypto.CryptoManager) (*Vault, error) {
 }
 
 func readVaultFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() > maxVaultFileSize {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maxVaultFileSize {
 		return nil, errVaultCorrupt
+	}
+	if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
+		return nil, ErrVaultStorageUnsafe
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	openedInfo, err := f.Stat()
+	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+		return nil, ErrVaultStorageUnsafe
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxVaultFileSize+1))
 	if err != nil {
 		return nil, err

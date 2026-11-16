@@ -51,7 +51,7 @@ type vaultSelectorRecord struct {
 	SourceV1SHA256    string            `json:"sourceV1Sha256,omitempty"`
 	PreparedV2SHA256  string            `json:"preparedV2Sha256,omitempty"`
 	ActivatedV2SHA256 string            `json:"activatedV2Sha256,omitempty"`
-	NativeV2           bool              `json:"nativeV2,omitempty"`
+	NativeV2          bool              `json:"nativeV2,omitempty"`
 }
 
 type vaultSelection struct {
@@ -158,12 +158,20 @@ func readVaultSelector(path string) (vaultSelectorRecord, error) {
 	if err != nil {
 		return record, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 4096 {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 4096 {
 		return record, ErrVaultSelectionAmbiguous
+	}
+	if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
+		return record, ErrVaultStorageUnsafe
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return record, err
+	}
+	openedInfo, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
+		_ = file.Close()
+		return record, ErrVaultStorageUnsafe
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 4097))
 	closeErr := file.Close()

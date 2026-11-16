@@ -54,7 +54,11 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 		return "", err
 	}
 
-	paths := vaultPaths(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return "", err
+	}
+	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	selector, err := readVaultSelector(paths.selector)
@@ -235,7 +239,11 @@ func (a *App) ConfirmV2VaultRecovery(token string) (bool, error) {
 		}
 	}()
 
-	paths := vaultPaths(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return false, err
+	}
+	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	selector, err := readVaultSelector(paths.selector)
