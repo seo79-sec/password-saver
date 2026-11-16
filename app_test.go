@@ -13,8 +13,20 @@ import (
 	"password-saver/crypto"
 )
 
+
+// seedLegacyVaultForTest preserves coverage of the old v1 auth path while
+// production first-run setup now creates v2 directly.
+func seedLegacyVaultForTest(t *testing.T, password string) {
+	t.Helper()
+	cm, err := crypto.NewCryptoManager(password)
+	if err != nil { t.Fatal(err) }
+	defer cm.Wipe()
+	if err := SaveVault(cm, &Vault{Accounts: []Account{}}); err != nil { t.Fatal(err) }
+}
+
 func TestAppAuthorizationAndSessionReset(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "correct horse battery staple")
 	a := NewApp()
 	if _, err := a.GetAccounts(); err == nil {
 		t.Fatal("unauthenticated GetAccounts succeeded")
@@ -48,6 +60,7 @@ func TestAppAuthorizationAndSessionReset(t *testing.T) {
 
 func TestMutationFailureRollsBackMemory(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "correct horse battery staple")
 	a := NewApp()
 	if _, err := a.Login("correct horse battery staple"); err != nil {
 		t.Fatal(err)
@@ -155,6 +168,7 @@ func TestResetChallengeExpiresAndActiveSessionCannotStartReset(t *testing.T) {
 
 func TestRepeatedLoginRequiresSecondFactorAgain(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "correct horse battery staple")
 	a := NewApp()
 	password := "correct horse battery staple"
 	if _, err := a.Login(password); err != nil {
@@ -197,6 +211,7 @@ func TestRepeatedLoginRequiresSecondFactorAgain(t *testing.T) {
 
 func TestConcurrentAppCallsAndLogoutAreSynchronized(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "correct horse battery staple")
 	a := NewApp()
 	if _, err := a.Login("correct horse battery staple"); err != nil {
 		t.Fatal(err)
@@ -225,6 +240,7 @@ func TestConcurrentAppCallsAndLogoutAreSynchronized(t *testing.T) {
 
 func TestMutationKeepsMemoryAlignedAfterDirectorySyncFailure(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "correct horse battery staple")
 	a := NewApp()
 	if _, err := a.Login("correct horse battery staple"); err != nil {
 		t.Fatal(err)
