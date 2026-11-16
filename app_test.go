@@ -13,15 +13,18 @@ import (
 	"password-saver/crypto"
 )
 
-
 // seedLegacyVaultForTest preserves coverage of the old v1 auth path while
 // production first-run setup now creates v2 directly.
 func seedLegacyVaultForTest(t *testing.T, password string) {
 	t.Helper()
 	cm, err := crypto.NewCryptoManager(password)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cm.Wipe()
-	if err := SaveVault(cm, &Vault{Accounts: []Account{}}); err != nil { t.Fatal(err) }
+	if err := SaveVault(cm, &Vault{Accounts: []Account{}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestAppAuthorizationAndSessionReset(t *testing.T) {
@@ -73,7 +76,7 @@ func TestMutationFailureRollsBackMemory(t *testing.T) {
 	t.Cleanup(func() { replaceVaultFile = oldRename })
 	failed := false
 	replaceVaultFile = func(src, dst string) error {
-		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && dst == dataFile {
+		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && filepath.Base(dst) == dataFile {
 			failed = true
 			return os.ErrPermission
 		}

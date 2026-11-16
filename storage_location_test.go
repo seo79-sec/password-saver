@@ -85,7 +85,7 @@ func TestV25InventoryRejectsNonRegularFileEntries(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, vaultSelectorFile), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inspectVaultFiles(dir); !errors.Is(err, ErrVaultDataLocation) {
+	if _, err := inspectVaultFiles(dir); !errors.Is(err, ErrVaultStorageUnsafe) {
 		t.Fatalf("directory in place of selector was accepted: %v", err)
 	}
 }

@@ -36,7 +36,11 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 		return cryptov2.ErrPasswordTooShort
 	}
 
-	paths := vaultPaths(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
+	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	vaultFileMu.Lock()
@@ -94,10 +98,10 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 	}
 	wipeVault(checkedBackup)
 	record := vaultSelectorRecord{
-		Format: "passwordsaver-vault-selector",
-		Version: 1,
-		Mode: selectorActiveV2,
-		NativeV2: true,
+		Format:            "passwordsaver-vault-selector",
+		Version:           1,
+		Mode:              selectorActiveV2,
+		NativeV2:          true,
 		ActivatedV2SHA256: digestHex(container),
 	}
 	if err := validateVaultSelectorRecord(record); err != nil {

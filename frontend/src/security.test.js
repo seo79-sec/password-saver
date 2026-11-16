@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, canOfferV2BackupRecovery, storageLocationMode, hasStorageBackup, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -52,11 +52,21 @@ test('v2 backup recovery is offered only when v2 is active and backup exists', (
   assert.equal(canOfferV2BackupRecovery({ state: 'ambiguous', v2BackupPresent: true }), false);
 });
 
+test('storage location states distinguish migration, conflict, ready and blocked', () => {
+  assert.equal(storageLocationMode({ state: 'ready' }), 'ready');
+  assert.equal(storageLocationMode({ state: 'migration-required' }), 'migration');
+  assert.equal(storageLocationMode({ state: 'conflict' }), 'conflict');
+  assert.equal(storageLocationMode({ state: 'error' }), 'blocked');
+  assert.equal(hasStorageBackup({ backupPresent: true }), true);
+  assert.equal(hasStorageBackup({ backupPresent: false }), false);
+});
+
 test('backend errors are rendered as safe actionable messages', () => {
   assert.match(friendlyBackendError(new Error('v2 vault authentication failed')), /Мастер-пароль/);
   assert.match(friendlyBackendError('v2 activation challenge expired'), /истёк/);
   assert.match(friendlyBackendError('active v2 vault is missing'), /автоматически не открываются/);
   assert.match(friendlyBackendError('master password must be at least 12 characters'), /12 символов/);
+  assert.match(friendlyBackendError('different vault files exist in both locations'), /ничего не перезаписало/);
   assert.doesNotMatch(friendlyBackendError('unexpected secret-bearing error'), /unexpected secret-bearing error/);
 });
 

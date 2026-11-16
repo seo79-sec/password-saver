@@ -85,6 +85,14 @@ func (s *v2VaultSession) save(vault *Vault) error {
 		return ErrVaultSessionClosed
 	}
 	dir := filepath.Dir(s.path)
+	activeDir, locationErr := activeVaultStorageDirectory()
+	if locationErr != nil || !sameStoragePath(activeDir, dir) {
+		s.closeLocked()
+		if locationErr != nil {
+			return errors.Join(ErrVaultSessionChanged, locationErr)
+		}
+		return ErrVaultSessionChanged
+	}
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	selection, err := resolveVaultSelectionLocked(dir)

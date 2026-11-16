@@ -52,6 +52,30 @@ export namespace main {
 	        this.preparationFresh = source["preparationFresh"];
 	    }
 	}
+	export class StorageLocationStatus {
+	    state: string;
+	    path: string;
+	    legacyPaths: Array<string>;
+	    format: string;
+	    algorithm: string;
+	    backupPresent: boolean;
+	    migrationPending: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new StorageLocationStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.path = source["path"];
+	        this.legacyPaths = source["legacyPaths"];
+	        this.format = source["format"];
+	        this.algorithm = source["algorithm"];
+	        this.backupPresent = source["backupPresent"];
+	        this.migrationPending = source["migrationPending"];
+	    }
+	}
 
 }
 

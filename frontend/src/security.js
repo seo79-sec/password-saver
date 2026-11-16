@@ -78,6 +78,17 @@ export function canOfferV2BackupRecovery(status) {
   return status?.state === 'v2-active' && status?.v2BackupPresent === true;
 }
 
+export function storageLocationMode(status) {
+  if (status?.state === 'ready') return 'ready';
+  if (status?.state === 'migration-required') return 'migration';
+  if (status?.state === 'conflict') return 'conflict';
+  return 'blocked';
+}
+
+export function hasStorageBackup(status) {
+  return status?.backupPresent === true;
+}
+
 export function friendlyBackendError(error) {
   const message = String(error?.message ?? error ?? '').toLowerCase();
   if (/authentication failed|incorrect .*master password|wrong.*password|неверный мастер-пароль/.test(message)) {
@@ -100,6 +111,12 @@ export function friendlyBackendError(error) {
   }
   if (/no space left|disk full|not enough space|ошибка 112/.test(message)) {
     return 'Недостаточно места для безопасной записи хранилища.';
+  }
+  if (/different vault files exist|storage.*conflict|conflict.*storage/.test(message)) {
+    return 'Найдены разные копии хранилища. Приложение остановило вход и ничего не перезаписало.';
+  }
+  if (/explicitly moved|storage migration.*expired|storage.*changed/.test(message)) {
+    return 'Перенос хранилища не завершён или подтверждение истекло. Исходная копия сохранена; начните проверку заново.';
   }
   if (/ambiguous|selector state is damaged|unknown.*format/.test(message)) {
     return 'Состояние формата хранилища повреждено или неоднозначно. Автоматического перехода между форматами не будет.';

@@ -32,6 +32,18 @@ export function GetAccounts():Promise<Array<main.Account>>;
 
 export function GetVaultStatus():Promise<main.VaultPublicStatus>;
 
+export function GetStorageLocationStatus():Promise<main.StorageLocationStatus>;
+
+export function OpenStorageFolder():Promise<void>;
+
+export function OpenLegacyStorageFolder():Promise<void>;
+
+export function PrepareStorageLocationMigration(arg1:string,arg2:string):Promise<string>;
+
+export function ConfirmStorageLocationMigration(arg1:string):Promise<void>;
+
+export function CancelStorageLocationMigration(arg1:string):Promise<void>;
+
 export function IsLocked():Promise<boolean>;
 
 export function Login(arg1:string):Promise<boolean>;

@@ -3,7 +3,10 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"time"
 
@@ -13,10 +16,10 @@ import (
 
 const (
 	VaultStateUninitialized = "uninitialized"
-	VaultStateV1Active   = "v1-active"
-	VaultStateV1Prepared = "v1-prepared"
-	VaultStateV2Active   = "v2-active"
-	VaultStateAmbiguous  = "ambiguous"
+	VaultStateV1Active      = "v1-active"
+	VaultStateV1Prepared    = "v1-prepared"
+	VaultStateV2Active      = "v2-active"
+	VaultStateAmbiguous     = "ambiguous"
 )
 
 // VaultPublicStatus is the only format information exposed to Wails. It never
@@ -32,6 +35,7 @@ var (
 	defaultV2EngineOnce sync.Once
 	defaultV2Engine     *cryptov2.Engine
 	defaultV2EngineErr  error
+	storageFolderOpener = openStorageFolder
 )
 
 func createDefaultV2Engine() (*cryptov2.Engine, error) {
@@ -64,9 +68,75 @@ func (a *App) v2ActivationLocked() *v2ActivationService {
 // screens. A valid active selector remains v2-active even if its file is
 // missing, so the frontend cannot offer a v1 downgrade.
 func (a *App) GetVaultStatus() VaultPublicStatus {
+	location := storageLocationStatus()
+	if location.State != "ready" {
+		return VaultPublicStatus{State: VaultStateAmbiguous}
+	}
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
-	return vaultPublicStatusLocked(".")
+	return vaultPublicStatusLocked(location.Path)
+}
+
+// GetStorageLocationStatus contains paths and format metadata only. It never
+// includes vault contents, password values, TOTP secrets, or cryptographic keys.
+func (a *App) GetStorageLocationStatus() StorageLocationStatus {
+	return storageLocationStatus()
+}
+
+// OpenStorageFolder opens only the configured per-user vault directory.
+func (a *App) OpenStorageFolder() error {
+	route, err := discoverStorageRoute()
+	if err != nil {
+		return err
+	}
+	if route.State == storageRouteNeedsMigration {
+		return ErrVaultDataLocation
+	}
+	if route.State == storageRouteReady {
+		if err := ensureStorageScaffold(route.Location, true); err != nil {
+			return err
+		}
+	}
+	return storageFolderOpener(route.Location.Root)
+}
+
+// OpenLegacyStorageFolder exposes only the detected legacy directory, never a
+// caller-supplied arbitrary path.
+func (a *App) OpenLegacyStorageFolder() error {
+	route, err := discoverStorageRoute()
+	if err != nil {
+		return err
+	}
+	if len(route.LegacyDirs) == 0 {
+		return os.ErrNotExist
+	}
+	return storageFolderOpener(route.LegacyDirs[0])
+}
+
+func openStorageFolder(path string) error {
+	if !filepath.IsAbs(path) {
+		return ErrVaultDataLocation
+	}
+	if err := checkExistingPathComponents(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrVaultStorageUnsafe
+	}
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		command = exec.Command("explorer.exe", path)
+	case "darwin":
+		command = exec.Command("open", path)
+	default:
+		command = exec.Command("xdg-open", path)
+	}
+	return command.Start()
 }
 
 func vaultPublicStatusLocked(directory string) VaultPublicStatus {
@@ -85,7 +155,9 @@ func vaultPublicStatusLocked(directory string) VaultPublicStatus {
 				return VaultPublicStatus{State: VaultStateAmbiguous}
 			}
 			if present {
-				if legacy == paths.v1 { return VaultPublicStatus{State: VaultStateV1Active} }
+				if legacy == paths.v1 {
+					return VaultPublicStatus{State: VaultStateV1Active}
+				}
 				return VaultPublicStatus{State: VaultStateAmbiguous}
 			}
 		}
@@ -128,14 +200,19 @@ func (a *App) LoginV2(password string) (bool, error) {
 		return false, err
 	}
 	a.logoutLocked()
-	selection, err := ResolveVaultSelection(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return false, err
+	}
+	selection, err := ResolveVaultSelection(directory)
 	if err != nil {
 		return false, err
 	}
 	if !selection.ActiveV2 {
 		return false, ErrVaultV2NotActive
 	}
-	present, statErr := pathExists(dataFileV2)
+	primaryPath := filepath.Join(directory, dataFileV2)
+	present, statErr := pathExists(primaryPath)
 	if statErr != nil || !present {
 		return false, ErrVaultV2Corrupt
 	}
@@ -143,7 +220,7 @@ func (a *App) LoginV2(password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	session, vault, err := openActiveV2VaultSession(dataFileV2, engine, password)
+	session, vault, err := openActiveV2VaultSession(primaryPath, engine, password)
 	if err != nil {
 		if errors.Is(err, cryptov2.ErrAuthentication) {
 			return false, ErrVaultV2Authentication
@@ -185,8 +262,12 @@ func (a *App) PrepareV2Migration(password, totpCode string) (string, error) {
 	if err := a.checkTOTPAttemptsLocked(); err != nil {
 		return "", err
 	}
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return "", err
+	}
 	vaultActivationMu.Lock()
-	status := vaultPublicStatusLocked(".")
+	status := vaultPublicStatusLocked(directory)
 	vaultActivationMu.Unlock()
 	if status.State == VaultStateV2Active {
 		return "", ErrVaultV2Protected
@@ -198,8 +279,9 @@ func (a *App) PrepareV2Migration(password, totpCode string) (string, error) {
 		return "", ErrVaultV2Corrupt
 	}
 
+	paths := vaultPaths(directory)
 	vaultFileMu.Lock()
-	source, err := readVaultFile(dataFile)
+	source, err := readVaultFile(paths.v1)
 	vaultFileMu.Unlock()
 	if err != nil {
 		return "", err
@@ -226,11 +308,11 @@ func (a *App) PrepareV2Migration(password, totpCode string) (string, error) {
 	}
 	service := a.v2ActivationLocked()
 	if !status.V2ContainerPresent {
-		if err := MigrateV1VaultToV2(password, engine); err != nil {
+		if err := migrateV1ToV2Paths(paths.v1, paths.v2, password, engine); err != nil {
 			return "", err
 		}
 	}
-	return service.prepareForSession(".", password, totpCode, engine, a.vault)
+	return service.prepareForSession(directory, password, totpCode, engine, a.vault)
 }
 
 // ConfirmV2Migration is the explicit second activation step. It verifies the
@@ -250,6 +332,9 @@ func (a *App) ConfirmV2Migration(token, password, totpCode string) error {
 		return errors.New("неверный код 2FA")
 	}
 	service := a.v2ActivationLocked()
+	if _, err := activeVaultStorageDirectory(); err != nil {
+		return err
+	}
 	engine, err := a.v2EngineLocked()
 	if err != nil {
 		return err
@@ -267,11 +352,18 @@ func (a *App) ConfirmV2Migration(token, password, totpCode string) error {
 func (a *App) BeginCancelV2Preparation() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.v2ActivationLocked().BeginCancelV2Preparation(".")
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return "", err
+	}
+	return a.v2ActivationLocked().BeginCancelV2Preparation(directory)
 }
 
 func (a *App) ConfirmCancelV2Preparation(token string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if _, err := activeVaultStorageDirectory(); err != nil {
+		return err
+	}
 	return a.v2ActivationLocked().ConfirmCancelV2Preparation(token)
 }

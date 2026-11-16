@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -134,7 +135,7 @@ func TestRecoveryDoesNotWipeKeyUntilRestoreCompletes(t *testing.T) {
 	oldReplace := replaceVaultFile
 	entered, release := make(chan struct{}), make(chan struct{})
 	replaceVaultFile = func(source, destination string) error {
-		if destination == dataFile {
+		if filepath.Base(destination) == dataFile {
 			close(entered)
 			<-release
 		}

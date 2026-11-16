@@ -21,22 +21,23 @@ import (
 
 // App struct управляет состоянием приложения и сессией в RAM
 type App struct {
-	mu               sync.RWMutex
-	ctx              context.Context
-	cm               *crypto.CryptoManager
-	v2Session        *v2VaultSession
-	v2Engine         *cryptov2.Engine
-	v2Activation     *v2ActivationService
-	vault            *Vault
-	twoFAVerified    bool // НОВОЕ: Флаг успешного прохождения 2FA
-	pendingReset     resetChallenge
-	pendingRecover   recoveryChallenge
-	pendingV2Recover v2RecoveryChallenge
-	idleTimer        *time.Timer
-	idleTimeout      time.Duration
-	lastActivity     time.Time
-	totpFailures     int
-	totpBlockedUntil time.Time
+	mu                      sync.RWMutex
+	ctx                     context.Context
+	cm                      *crypto.CryptoManager
+	v2Session               *v2VaultSession
+	v2Engine                *cryptov2.Engine
+	v2Activation            *v2ActivationService
+	vault                   *Vault
+	twoFAVerified           bool // НОВОЕ: Флаг успешного прохождения 2FA
+	pendingReset            resetChallenge
+	pendingRecover          recoveryChallenge
+	pendingV2Recover        v2RecoveryChallenge
+	pendingStorageMigration storageMigrationChallenge
+	idleTimer               *time.Timer
+	idleTimeout             time.Duration
+	lastActivity            time.Time
+	totpFailures            int
+	totpBlockedUntil        time.Time
 }
 
 type resetChallenge struct {
@@ -62,6 +63,9 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ctx = ctx
+	// Initialize the per-user scaffold only when no legacy migration or path
+	// conflict is pending. Errors remain available through the status API.
+	_ = storageLocationStatus()
 }
 
 // 1. АВТОРИЗАЦИЯ И БЕЗОПАСНОСТЬ СЕССИИ
@@ -78,13 +82,17 @@ func (a *App) Login(password string) (bool, error) {
 	// previous session had completed the second factor.
 	a.logoutLocked()
 	a.clearPendingChallengesLocked()
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return false, err
+	}
 	// Only existing legacy vaults may use the v1 login path.
 	// New installations must explicitly initialize the v2 container.
 	if vaultPublicStatusForLogin := a.GetVaultStatus(); vaultPublicStatusForLogin.State == VaultStateUninitialized {
 		return false, ErrVaultV1CreationDisabled
 	}
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	if selectionErr != nil {
 		vaultActivationMu.Unlock()
 		return false, selectionErr
@@ -99,10 +107,10 @@ func (a *App) Login(password string) (bool, error) {
 		return false, err
 	}
 
-	v, err := LoadVault(cm)
+	v, err := loadVaultAtDirectory(cm, directory)
 	if err == nil && selection.NeedsV1Record {
 		state := vaultSelectorRecord{Format: "passwordsaver-vault-selector", Version: 1, Mode: selectorActiveV1}
-		if stateErr := writeVaultSelector(vaultPaths(".").selector, state); stateErr != nil {
+		if stateErr := writeVaultSelector(vaultPaths(directory).selector, state); stateErr != nil {
 			wipeVault(v)
 			cm.Wipe()
 			vaultActivationMu.Unlock()
@@ -243,7 +251,11 @@ func (a *App) unlockActiveV2ForBackend(password, totpCode string, engine *crypto
 		return errors.New("слишком много неверных кодов 2FA; попробуйте позже")
 	}
 	a.logoutLocked()
-	path := filepath.Join(".", dataFileV2)
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, dataFileV2)
 	session, vault, err := openActiveV2VaultSession(path, engine, password)
 	if err != nil {
 		return err
@@ -275,9 +287,13 @@ func (a *App) confirmV2Activation(service *v2ActivationService, token, password,
 }
 
 func (a *App) confirmV2ActivationLocked(service *v2ActivationService, token, password, totpCode string, engine *cryptov2.Engine) error {
+	directory, directoryErr := activeVaultStorageDirectory()
+	if directoryErr != nil {
+		return directoryErr
+	}
 	err := service.Confirm(token, password, totpCode, engine)
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	vaultActivationMu.Unlock()
 	if err == nil || (selectionErr == nil && selection.ActiveV2) {
 		a.logoutLocked()
@@ -316,6 +332,11 @@ func (a *App) updateVault(change func(*Vault)) error {
 	}
 	if err := SaveVault(a.cm, a.vault); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
+			return err
+		}
+		if errors.Is(err, ErrVaultStorageConflict) || errors.Is(err, ErrVaultStorageMigration) || errors.Is(err, ErrVaultStorageUnsafe) || errors.Is(err, ErrVaultDataLocation) {
+			wipeVault(before)
+			a.logoutLocked()
 			return err
 		}
 		a.vault = before
@@ -411,8 +432,12 @@ func (a *App) BeginVaultReset() (string, error) {
 	if !a.isLockedLocked() {
 		return "", errors.New("сначала заблокируйте хранилище")
 	}
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return "", err
+	}
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	vaultActivationMu.Unlock()
 	if selectionErr != nil {
 		return "", selectionErr
@@ -452,8 +477,12 @@ func (a *App) ResetVault(token string) error {
 		return errors.New("подтверждение сброса отсутствует или истекло")
 	}
 	a.pendingReset = resetChallenge{}
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		return err
+	}
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	if selectionErr != nil {
 		vaultActivationMu.Unlock()
 		return selectionErr
@@ -469,12 +498,13 @@ func (a *App) ResetVault(token string) error {
 	defer vaultFileMu.Unlock()
 	defer vaultActivationMu.Unlock()
 	a.logoutLocked()
-	for _, path := range []string{dataFile, dataFile + ".bak"} {
+	paths := vaultPaths(directory)
+	for _, path := range []string{paths.v1, paths.v1 + ".bak"} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	if err := syncVaultDirectory("."); err != nil {
+	if err := syncVaultDirectory(directory); err != nil {
 		return fmt.Errorf("%w: reset removal durability uncertain: %v", errVaultCommitUncertain, err)
 	}
 	return nil
@@ -494,8 +524,13 @@ func (a *App) PrepareVaultRecovery(password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	directory, err := activeVaultStorageDirectory()
+	if err != nil {
+		cm.Wipe()
+		return "", err
+	}
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	if selectionErr != nil {
 		vaultActivationMu.Unlock()
 		cm.Wipe()
@@ -510,14 +545,15 @@ func (a *App) PrepareVaultRecovery(password string) (string, error) {
 		return "", ErrVaultV2PreparationPending
 	}
 	vaultFileMu.Lock()
-	_, primaryErr := loadVaultFromPath(cm, dataFile)
+	paths := vaultPaths(directory)
+	_, primaryErr := loadVaultFromPath(cm, paths.v1)
 	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
 		vaultFileMu.Unlock()
 		vaultActivationMu.Unlock()
 		cm.Wipe()
 		return "", errors.New("основной файл нельзя безопасно восстановить")
 	}
-	_, backupErr := loadVaultFromPath(cm, dataFile+".bak")
+	_, backupErr := loadVaultFromPath(cm, paths.v1+".bak")
 	vaultFileMu.Unlock()
 	vaultActivationMu.Unlock()
 	if backupErr != nil {
@@ -567,7 +603,12 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 		}
 	}()
 	vaultActivationMu.Lock()
-	selection, selectionErr := resolveVaultSelectionLocked(".")
+	directory, dirErr := activeVaultStorageDirectory()
+	if dirErr != nil {
+		vaultActivationMu.Unlock()
+		return false, dirErr
+	}
+	selection, selectionErr := resolveVaultSelectionLocked(directory)
 	if selectionErr != nil || selection.ActiveV2 || selection.Prepared {
 		vaultActivationMu.Unlock()
 		if selectionErr != nil {
@@ -581,12 +622,13 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 	vaultFileMu.Lock()
 	defer vaultFileMu.Unlock()
 	defer vaultActivationMu.Unlock()
-	_, primaryErr := loadVaultFromPath(pending.cm, dataFile)
+	paths := vaultPaths(directory)
+	_, primaryErr := loadVaultFromPath(pending.cm, paths.v1)
 	if primaryErr == nil || (!errors.Is(primaryErr, os.ErrNotExist) && !errors.Is(primaryErr, errVaultCorrupt)) {
 		a.clearPendingRecoveryLocked()
 		return false, errors.New("основной файл изменился; повторите проверку восстановления")
 	}
-	backupData, err := recoveryBackupReader(dataFile + ".bak")
+	backupData, err := recoveryBackupReader(paths.v1 + ".bak")
 	if err != nil {
 		return false, err
 	}
@@ -596,7 +638,7 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 	}
 	archivePath := ""
 	if !errors.Is(primaryErr, os.ErrNotExist) {
-		archive, err := os.CreateTemp(".", "vault_data.enc.corrupt-*")
+		archive, err := os.CreateTemp(directory, dataFile+".corrupt-*")
 		if err != nil {
 			return false, err
 		}
@@ -608,16 +650,16 @@ func (a *App) ConfirmVaultRecovery(token string) (bool, error) {
 		if err := os.Remove(archivePath); err != nil {
 			return false, err
 		}
-		if err := os.Rename(dataFile, archivePath); err != nil {
+		if err := os.Rename(paths.v1, archivePath); err != nil {
 			return false, err
 		}
 	}
-	if err := writeFileAtomic(dataFile, backupData); err != nil {
+	if err := writeFileAtomic(paths.v1, backupData); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
 			return false, fmt.Errorf("основной файл восстановлен, но синхронизация каталога не подтверждена: %w", err)
 		}
 		if archivePath != "" {
-			if restoreErr := os.Rename(archivePath, dataFile); restoreErr != nil {
+			if restoreErr := os.Rename(archivePath, paths.v1); restoreErr != nil {
 				return false, fmt.Errorf("restore failed (%v); diagnostic file retained at %s: %w", err, archivePath, restoreErr)
 			}
 		}
@@ -664,6 +706,7 @@ func (a *App) clearPendingChallengesLocked() {
 	a.pendingReset = resetChallenge{}
 	a.clearPendingRecoveryLocked()
 	a.clearPendingV2RecoveryLocked()
+	a.clearPendingStorageMigrationLocked()
 }
 
 // --- ЛОГИКА ДВУХФАКТОРНОЙ АУТЕНТИФИКАЦИИ ---

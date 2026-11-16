@@ -214,7 +214,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		}
 		oldReplace := replaceVaultFile
 		replaceVaultFile = func(source, destination string) error {
-			if destination == dataFileV2 {
+			if filepath.Base(destination) == dataFileV2 {
 				return errors.New("injected v2 recovery replacement failure")
 			}
 			return oldReplace(source, destination)

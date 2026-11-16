@@ -62,6 +62,30 @@ export function GetVaultStatus() {
   return window['go']['main']['App']['GetVaultStatus']();
 }
 
+export function GetStorageLocationStatus() {
+  return window['go']['main']['App']['GetStorageLocationStatus']();
+}
+
+export function OpenStorageFolder() {
+  return window['go']['main']['App']['OpenStorageFolder']();
+}
+
+export function OpenLegacyStorageFolder() {
+  return window['go']['main']['App']['OpenLegacyStorageFolder']();
+}
+
+export function PrepareStorageLocationMigration(arg1, arg2) {
+  return window['go']['main']['App']['PrepareStorageLocationMigration'](arg1, arg2);
+}
+
+export function ConfirmStorageLocationMigration(arg1) {
+  return window['go']['main']['App']['ConfirmStorageLocationMigration'](arg1);
+}
+
+export function CancelStorageLocationMigration(arg1) {
+  return window['go']['main']['App']['CancelStorageLocationMigration'](arg1);
+}
+
 export function IsLocked() {
   return window['go']['main']['App']['IsLocked']();
 }

@@ -19,7 +19,16 @@ var legacyVaultFixture embed.FS
 
 func withVaultDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	base := t.TempDir()
+	dir := filepath.Join(base, "PasswordSaver", "vaults", "default")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	restoreStorage := setStorageDirectoryOverrideForTest(dir)
+	t.Cleanup(restoreStorage)
+	previousLegacyProvider := legacyDirectoryProvider
+	legacyDirectoryProvider = func(string) ([]string, error) { return nil, nil }
+	t.Cleanup(func() { legacyDirectoryProvider = previousLegacyProvider })
 	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +245,7 @@ func TestSaveVaultWriteFailurePreservesPreviousFile(t *testing.T) {
 	defer func() { replaceVaultFile = oldRename }()
 	failed := false
 	replaceVaultFile = func(src, dst string) error {
-		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && dst == path {
+		if strings.HasPrefix(filepath.Base(src), ".vault-write-") && filepath.Clean(dst) == filepath.Clean(path) {
 			failed = true
 			return os.ErrPermission
 		}
