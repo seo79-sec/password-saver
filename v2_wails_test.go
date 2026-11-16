@@ -253,3 +253,60 @@ func TestWailsCancelAfterRestartOrMissingCandidateAndRefuseV2(t *testing.T) {
 		t.Fatalf("UI allowed cancel of active v2: %v", err)
 	}
 }
+
+
+func TestWailsV2TOTPLimitPersistsAcrossRepeatedMasterPasswordLogin(t *testing.T) {
+	vault := syntheticMigrationVault()
+	engine, _, _, _ := createV1AndPreparedV2(t, vault)
+	service, token := prepareActivation(t, engine, vault)
+	if err := service.Confirm(token, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.v2Engine = engine
+
+	for i := 0; i < maxTOTPFailures-1; i++ {
+		requiresTOTP, err := app.LoginV2(migrationTestPassword)
+		if err != nil || !requiresTOTP {
+			t.Fatalf("password login %d failed: requiresTOTP=%v err=%v", i, requiresTOTP, err)
+		}
+		if err := app.Verify2FA("invalid-code"); err == nil {
+			t.Fatalf("incorrect TOTP %d was accepted", i)
+		}
+		app.Logout()
+		if app.totpFailures != i+1 {
+			t.Fatalf("Logout/reset bypassed TOTP counter: got %d want %d", app.totpFailures, i+1)
+		}
+	}
+
+	requiresTOTP, err := app.LoginV2(migrationTestPassword)
+	if err != nil || !requiresTOTP {
+		t.Fatalf("fifth password login failed: requiresTOTP=%v err=%v", requiresTOTP, err)
+	}
+	if err := app.Verify2FA("invalid-code"); err == nil {
+		t.Fatal("fifth incorrect TOTP was accepted")
+	}
+	if !time.Now().Before(app.totpBlockedUntil) {
+		t.Fatal("fifth incorrect TOTP did not start lockout")
+	}
+	app.Logout()
+	if _, err := app.LoginV2(migrationTestPassword); err == nil {
+		t.Fatal("master-password login bypassed the active TOTP lockout")
+	}
+
+	// Simulate the lockout elapsing without sleeping for a minute.
+	app.mu.Lock()
+	app.totpBlockedUntil = time.Now().Add(-time.Second)
+	app.mu.Unlock()
+	requiresTOTP, err = app.LoginV2(migrationTestPassword)
+	if err != nil || !requiresTOTP {
+		t.Fatalf("login after lockout expired: requiresTOTP=%v err=%v", requiresTOTP, err)
+	}
+	if err := app.Verify2FA(currentCode(t, vault.TwoFASecret)); err != nil {
+		t.Fatalf("correct TOTP after lockout expired: %v", err)
+	}
+	if app.IsLocked() || app.totpFailures != 0 || !app.totpBlockedUntil.IsZero() {
+		t.Fatal("successful TOTP did not finish authentication and reset lockout state")
+	}
+	app.Logout()
+}
