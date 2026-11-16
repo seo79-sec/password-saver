@@ -97,6 +97,7 @@ func (a *App) CreateV2Vault(masterPassword string) error {
 		Format: "passwordsaver-vault-selector",
 		Version: 1,
 		Mode: selectorActiveV2,
+		NativeV2: true,
 		ActivatedV2SHA256: digestHex(container),
 	}
 	if err := validateVaultSelectorRecord(record); err != nil {
