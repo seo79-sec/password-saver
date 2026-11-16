@@ -139,7 +139,12 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 // Corrupt bytes without recognizable future-format metadata can proceed only
 // through backup authentication and the separate user confirmation.
 func recoveryHeaderIsUnsupported(data []byte) bool {
-	fields := readPartialJSONObject(data)
+	fields, duplicateField := readPartialJSONObject(data)
+	if duplicateField {
+		// A duplicate metadata key is ambiguous and noncanonical. Refuse to
+		// interpret it as a repairable current-format container.
+		return true
+	}
 	format, hasFormat := rawJSONString(fields["format"])
 	version, hasVersion := rawJSONUint(fields["version"])
 	aead, hasAEAD := rawJSONString(fields["aead"])
@@ -168,12 +173,12 @@ func recoveryHeaderIsUnsupported(data []byte) bool {
 // readPartialJSONObject retains top-level values decoded before a JSON parse
 // error. Recovery must still recognize an unsupported version or algorithm
 // when later bytes in that container are truncated or damaged.
-func readPartialJSONObject(data []byte) map[string]json.RawMessage {
+func readPartialJSONObject(data []byte) (map[string]json.RawMessage, bool) {
 	fields := make(map[string]json.RawMessage)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil || token != json.Delim('{') {
-		return fields
+		return fields, false
 	}
 	for decoder.More() {
 		keyToken, err := decoder.Token()
@@ -188,9 +193,12 @@ func readPartialJSONObject(data []byte) map[string]json.RawMessage {
 		if err := decoder.Decode(&value); err != nil {
 			break
 		}
+		if _, exists := fields[key]; exists {
+			return fields, true
+		}
 		fields[key] = append(json.RawMessage(nil), value...)
 	}
-	return fields
+	return fields, false
 }
 
 func rawJSONString(value json.RawMessage) (string, bool) {
