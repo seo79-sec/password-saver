@@ -14,6 +14,8 @@ export function CancelVaultReset(arg1:string):Promise<void>;
 
 export function CheckInactivity():Promise<boolean>;
 
+export function CreateV2Vault(arg1:string):Promise<void>;
+
 export function ConfirmAndEnable2FA(arg1:string,arg2:string):Promise<void>;
 
 export function ConfirmCancelV2Preparation(arg1:string):Promise<void>;
