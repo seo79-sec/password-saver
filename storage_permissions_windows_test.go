@@ -5,8 +5,9 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -48,19 +49,52 @@ func TestWindowsStorageACLForDirectoriesAndFiles(t *testing.T) {
 			if err != nil || !owner.Equals(user.User.Sid) {
 				t.Fatalf("wrong owner: %v", err)
 			}
-			dacl := sd.String()
-			flags := ""
-			if directory {
-				flags = "OICI"
+			dacl, _, err := sd.DACL()
+			if err != nil || dacl == nil || dacl.AceCount != 3 {
+				t.Fatalf("expected exactly three explicit access grants: %v; %s", err, sd.String())
 			}
-			for _, trustee := range []string{user.User.Sid.String(), "SY", "BA"} {
-				if !strings.Contains(dacl, "(A;"+flags+";FA;;;"+trustee+")") {
-					t.Fatalf("required ACE absent: %s", dacl)
+			// Windows may serialize the current user's SID as an SDDL alias
+			// (for example LA on the CI worker). Compare SID values, not SDDL.
+			system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := []*windows.SID{user.User.Sid, system, admins}
+			seen := make([]bool, len(expected))
+			flags := uint8(0)
+			if directory {
+				flags = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+			}
+			// FILE_ALL_ACCESS is all file-specific rights plus standard rights
+			// and SYNCHRONIZE, as defined by Windows winnt.h.
+			const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+			for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+				var ace *windows.ACCESS_ALLOWED_ACE
+				if err := windows.GetAce(dacl, i, &ace); err != nil {
+					t.Fatal(err)
+				}
+				if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != flags || ace.Mask != fileAllAccess {
+					t.Fatalf("unexpected ACE type, inheritance or permissions: %+v", ace)
+				}
+				// SidStart is the first DWORD of the variable-length SID owned
+				// by the security descriptor returned by Windows GetAce.
+				trustee := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+				matched := false
+				for j, sid := range expected {
+					if trustee.Equals(sid) && !seen[j] {
+						seen[j], matched = true, true
+						break
+					}
+				}
+				if !matched {
+					t.Fatalf("unexpected or duplicate trustee: %s", trustee.String())
 				}
 			}
-			if strings.Count(dacl, "(A;") != 3 {
-				t.Fatalf("unexpected access grant: %s", dacl)
-			}
+			runtime.KeepAlive(sd)
 		})
 	}
 }
