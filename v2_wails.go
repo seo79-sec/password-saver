@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	VaultStateUninitialized = "uninitialized"
 	VaultStateV1Active   = "v1-active"
 	VaultStateV1Prepared = "v1-prepared"
 	VaultStateV2Active   = "v2-active"
@@ -76,7 +77,19 @@ func vaultPublicStatusLocked(directory string) VaultPublicStatus {
 		if candidateErr != nil || candidate {
 			return VaultPublicStatus{State: VaultStateAmbiguous}
 		}
-		return VaultPublicStatus{State: VaultStateV1Active}
+		// A genuinely empty directory is ready for direct v2 creation.
+		// Even a lone v1 backup or orphan v2 backup must block this path.
+		for _, legacy := range []string{paths.v1, paths.v1 + ".bak", paths.v2 + ".bak"} {
+			present, checkErr := pathExists(legacy)
+			if checkErr != nil {
+				return VaultPublicStatus{State: VaultStateAmbiguous}
+			}
+			if present {
+				if legacy == paths.v1 { return VaultPublicStatus{State: VaultStateV1Active} }
+				return VaultPublicStatus{State: VaultStateAmbiguous}
+			}
+		}
+		return VaultPublicStatus{State: VaultStateUninitialized}
 	}
 	if err != nil || validateVaultSelectorRecord(record) != nil {
 		return VaultPublicStatus{State: VaultStateAmbiguous}

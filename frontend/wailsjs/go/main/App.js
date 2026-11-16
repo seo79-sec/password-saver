@@ -26,6 +26,10 @@ export function CheckInactivity() {
   return window['go']['main']['App']['CheckInactivity']();
 }
 
+export function CreateV2Vault(arg1) {
+  return window['go']['main']['App']['CreateV2Vault'](arg1);
+}
+
 export function ConfirmAndEnable2FA(arg1, arg2) {
   return window['go']['main']['App']['ConfirmAndEnable2FA'](arg1, arg2);
 }

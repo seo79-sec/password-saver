@@ -68,6 +68,7 @@ export function toggleSecretVisibility(visibleIDs, id) {
 
 export function loginModeForVaultStatus(status) {
   if (status?.state === 'v2-active') return 'v2';
+  if (status?.state === 'uninitialized') return 'setup';
   if (status?.state === 'v1-active') return 'v1';
   if (status?.state === 'v1-prepared' && status.v2ContainerPresent) return 'v1';
   return 'blocked';

@@ -90,6 +90,11 @@ func TestVaultSelectionRefusesAmbiguousOrCorruptState(t *testing.T) {
 
 func TestSuccessfulLegacyLoginPersistsExplicitV1Selection(t *testing.T) {
 	withVaultDir(t)
+	// A real legacy vault, not an empty directory, may still use the v1 path.
+	cm, err := crypto.NewCryptoManager(migrationTestPassword)
+	if err != nil { t.Fatal(err) }
+	if err := SaveVault(cm, &Vault{Accounts: []Account{}}); err != nil { t.Fatal(err) }
+	cm.Wipe()
 	app := NewApp()
 	if _, err := app.Login(migrationTestPassword); err != nil {
 		t.Fatal(err)

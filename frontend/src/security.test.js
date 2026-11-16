@@ -40,6 +40,7 @@ test('vault status chooses only the selected login path and blocks ambiguous sta
   assert.equal(loginModeForVaultStatus({ state: 'v1-prepared', v2ContainerPresent: true }), 'v1');
   assert.equal(loginModeForVaultStatus({ state: 'v1-prepared', v2ContainerPresent: false }), 'blocked');
   assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
+  assert.equal(loginModeForVaultStatus({ state: 'uninitialized' }), 'setup');
   assert.equal(loginModeForVaultStatus({ state: 'ambiguous' }), 'blocked');
   assert.equal(loginModeForVaultStatus(null), 'blocked');
 });

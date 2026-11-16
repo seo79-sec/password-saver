@@ -78,6 +78,11 @@ func (a *App) Login(password string) (bool, error) {
 	// previous session had completed the second factor.
 	a.logoutLocked()
 	a.clearPendingChallengesLocked()
+	// Only existing legacy vaults may use the v1 login path.
+	// New installations must explicitly initialize the v2 container.
+	if vaultPublicStatusForLogin := a.GetVaultStatus(); vaultPublicStatusForLogin.State == VaultStateUninitialized {
+		return false, ErrVaultV1CreationDisabled
+	}
 	vaultActivationMu.Lock()
 	selection, selectionErr := resolveVaultSelectionLocked(".")
 	if selectionErr != nil {

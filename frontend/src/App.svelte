@@ -3,7 +3,7 @@
   import { fade, slide, fly } from 'svelte/transition';
   import { flip } from 'svelte/animate';
   import { 
-    Login, LoginV2, GetVaultStatus, PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
+    Login, LoginV2, CreateV2Vault, GetVaultStatus, PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
     Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
@@ -16,6 +16,9 @@
   let isLoggedIn = false;
   let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
   let loginFormat = 'v1';
+  let setupMasterPassword = '';
+  let setupConfirmPassword = '';
+  let setupBusy = false;
   let masterPassword = '';
   let errorMessage = '';
   let lockReason = ''; 
@@ -252,6 +255,37 @@
   }
 
   // --- ОБНОВЛЕННЫЕ ФУНКЦИИ ВХОДА (2FA) ---
+  async function handleCreateV2() {
+    if (setupBusy || vaultStatus.state !== 'uninitialized') return;
+    if (setupMasterPassword.length < 12) {
+      errorMessage = 'Мастер-пароль должен содержать минимум 12 символов.';
+      return;
+    }
+    if (setupMasterPassword !== setupConfirmPassword) {
+      errorMessage = 'Мастер-пароли не совпадают.';
+      return;
+    }
+    setupBusy = true;
+    const password = setupMasterPassword;
+    setupMasterPassword = '';
+    setupConfirmPassword = '';
+    try {
+      await CreateV2Vault(password);
+      errorMessage = '';
+      await refreshVaultStatus();
+      // Unlock through the ordinary v2 login flow; no v1 writes.
+      if (vaultStatus.state !== 'v2-active') throw new Error('v2 initialization status could not be confirmed');
+      const requires2FA = await LoginV2(password);
+      if (requires2FA) show2FAInput = true;
+      else { sessionGeneration.advance(); isLoggedIn = true; lockReason = ''; loadAccounts(); }
+    } catch (err) {
+      errorMessage = friendlyBackendError(err);
+      await refreshVaultStatus();
+    } finally {
+      setupBusy = false;
+    }
+  }
+
   async function handleLogin() {
     loginFormat = loginModeForVaultStatus(vaultStatus);
     if (loginFormat === 'blocked') {
@@ -569,6 +603,8 @@
 
       {#if vaultStatus.state === 'loading'}
         <p class="subtitle">Проверка состояния хранилища…</p>
+      {:else if vaultStatus.state === 'uninitialized'}
+        <p class="subtitle">Создайте новое хранилище v2 (AES-256-GCM).</p>
       {:else if vaultStatus.state === 'ambiguous'}
         <p class="error">Состояние формата хранилища неоднозначно или повреждено. Автоматический переход между форматами отключён.</p>
       {:else if vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent}
@@ -577,7 +613,13 @@
         <p class="subtitle">Активное хранилище: {vaultStatus.state === 'v2-active' ? 'v2' : vaultStatus.state === 'v1-prepared' ? 'v1 (v2 подготовлен)' : 'v1'}</p>
       {/if}
 
-      {#if loginModeForVaultStatus(vaultStatus) === 'blocked'}
+      {#if vaultStatus.state === 'uninitialized'}
+        <div class="input-group" transition:fade>
+          <input type="password" bind:value={setupMasterPassword} placeholder="Новый мастер-пароль (от 12 символов)" autocomplete="new-password" />
+          <input type="password" bind:value={setupConfirmPassword} placeholder="Повторите мастер-пароль" autocomplete="new-password" on:keydown={(e) => e.key === 'Enter' && handleCreateV2()} />
+          <button class="btn-primary" disabled={setupBusy || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
+        </div>
+      {:else if loginModeForVaultStatus(vaultStatus) === 'blocked'}
         {#if vaultStatus.state === 'v1-prepared'}
           <p class="warning-text">Незавершённую подготовку можно безопасно отменить. Файлы при отмене сохраняются.</p>
           <button class="btn-secondary" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>
