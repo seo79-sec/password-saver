@@ -100,6 +100,29 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		}
 	})
 
+	t.Run("authenticated but invalid vault payload", func(t *testing.T) {
+		app, engine := activatedV2App(t, syntheticMigrationVault())
+		app.Logout()
+		invalidVault, err := engine.Encrypt(migrationTestPassword, []byte("authenticated but not vault JSON"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dataFileV2, invalidVault, 0600); err != nil {
+			t.Fatal(err)
+		}
+		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		if err != nil {
+			t.Fatalf("prepare rejected invalid decrypted Vault data: %v", err)
+		}
+		if _, err := app.ConfirmV2VaultRecovery(token); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadV2Vault(dataFileV2, engine, migrationTestPassword); err != nil {
+			t.Fatalf("backup recovery did not repair the primary: %v", err)
+		}
+		app.Logout()
+	})
+
 	t.Run("missing primary after restart", func(t *testing.T) {
 		app, engine := activatedV2App(t, syntheticMigrationVault())
 		app.Logout()

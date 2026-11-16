@@ -67,13 +67,11 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 		// diagnostics, including non-regular or over-limit files.
 		return "", primaryErr
 	} else {
-		if primaryPlaintext, openErr := engine.Decrypt(password, primaryBytes); openErr == nil {
-			wipeBytes(primaryPlaintext)
+		if primaryVault, openErr := decryptV2VaultData(primaryBytes, engine, password); openErr == nil {
+			wipeVault(primaryVault)
 			return "", errors.New("основное хранилище открывается; восстановление резервной копии не требуется")
-		} else if !errors.Is(openErr, cryptov2.ErrAuthentication) &&
-			!errors.Is(openErr, cryptov2.ErrInvalidContainer) &&
-			!errors.Is(openErr, cryptov2.ErrInputTooLarge) {
-			return "", mapV2RecoveryError(openErr)
+		} else if !errors.Is(openErr, ErrVaultV2Authentication) && !errors.Is(openErr, ErrVaultV2Corrupt) {
+			return "", openErr
 		}
 	}
 
