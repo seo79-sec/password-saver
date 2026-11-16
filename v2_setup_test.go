@@ -40,7 +40,7 @@ func TestFirstRunCreatesV2OnlyAndSupportsRestart(t *testing.T) {
     if err != nil { t.Fatal(err) }
     if !bytes.Equal(primary, backup) { t.Fatal("initial backup differs from encrypted primary") }
     selector, err := readVaultSelector(vaultSelectorFile)
-    if err != nil || selector.Mode != selectorActiveV2 || selector.ActivatedV2SHA256 != digestHex(primary) {
+    if err != nil || selector.Mode != selectorActiveV2 || !selector.NativeV2 || selector.SourceV1SHA256 != "" || selector.ActivatedV2SHA256 != digestHex(primary) {
         t.Fatalf("first-run selector = (%+v, %v)", selector, err)
     }
     reopened := NewApp()
