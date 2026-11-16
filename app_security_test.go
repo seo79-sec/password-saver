@@ -44,6 +44,7 @@ func TestTOTPAttemptLimitBlocksAndExpires(t *testing.T) {
 
 func TestBackendIdleDeadlineLocksSession(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "test-only master password")
 	a := NewApp()
 	if _, err := a.Login("test-only master password"); err != nil {
 		t.Fatal(err)
@@ -61,6 +62,7 @@ func TestBackendIdleDeadlineLocksSession(t *testing.T) {
 
 func TestTOTPCanBeRetriedAfterAnIncorrectCode(t *testing.T) {
 	withVaultDir(t)
+	seedLegacyVaultForTest(t, "test-only master password")
 	a := NewApp()
 	password := "test-only master password"
 	if _, err := a.Login(password); err != nil {
