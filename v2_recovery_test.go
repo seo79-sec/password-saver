@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"password-saver/crypto"
+	cryptov2 "password-saver/crypto/v2"
 )
 
 func corruptV2Primary(t *testing.T) []byte {
@@ -158,14 +162,45 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		if err := os.WriteFile(dataFileV2+".bak", []byte("changed after verification"), 0600); err != nil {
 			t.Fatal(err)
 		}
+		preserved := snapshotV2RecoveryImmutableFiles(t)
+		primaryBefore, _ := os.ReadFile(dataFileV2)
+		backupBefore, _ := os.ReadFile(dataFileV2 + ".bak")
 		if _, err := app.ConfirmV2VaultRecovery(token); err == nil {
 			t.Fatal("recovery accepted a backup changed after verification")
 		}
-		if _, err := os.Stat(dataFileV2); err != nil {
-			t.Fatalf("failed recovery removed damaged primary: %v", err)
-		}
+		assertV2RecoveryImmutableFiles(t, preserved)
+		assertFileBytes(t, dataFileV2, primaryBefore)
+		assertFileBytes(t, dataFileV2+".bak", backupBefore)
 		if !app.IsLocked() {
 			t.Fatal("failed recovery unlocked the app")
+		}
+	})
+
+	t.Run("primary changed after preparation", func(t *testing.T) {
+		app, _ := activatedV2App(t, syntheticMigrationVault())
+		app.Logout()
+		corrupt := corruptV2Primary(t)
+		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := []byte("external change after preparation")
+		if err := os.WriteFile(dataFileV2, changed, 0600); err != nil {
+			t.Fatal(err)
+		}
+		preserved := snapshotV2RecoveryImmutableFiles(t)
+		primaryBefore, _ := os.ReadFile(dataFileV2)
+		if _, err := app.ConfirmV2VaultRecovery(token); err == nil {
+			t.Fatal("recovery accepted a primary changed after verification")
+		}
+		assertV2RecoveryImmutableFiles(t, preserved)
+		assertFileBytes(t, dataFileV2, primaryBefore)
+		if bytes.Equal(primaryBefore, corrupt) {
+			t.Fatal("test did not change the primary after preparation")
+		}
+		archives, _ := filepath.Glob(dataFileV2 + ".corrupt-*")
+		if len(archives) != 0 {
+			t.Fatalf("stale challenge created diagnostic archive: %v", archives)
 		}
 	})
 
@@ -196,6 +231,280 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 			t.Fatal("replacement failure unlocked the app")
 		}
 	})
+}
+
+func TestV2BackupRecoveryRepairsRecognizedDamagedPrimaryBytes(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func([]byte) []byte
+	}{
+		{name: "empty primary", edit: func([]byte) []byte { return []byte{} }},
+		{name: "arbitrary damaged bytes", edit: func([]byte) []byte { return []byte("\x00not a container\xff") }},
+		{name: "truncated json", edit: func([]byte) []byte { return []byte(`{"format":"passwordsaver-v2","version":2`) }},
+		{name: "damaged aead tag", edit: damageV2Tag},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, _ := activatedV2App(t, syntheticMigrationVault())
+			app.Logout()
+			originalPrimary, err := os.ReadFile(dataFileV2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backupBefore, err := os.ReadFile(dataFileV2 + ".bak")
+			if err != nil {
+				t.Fatal(err)
+			}
+			damaged := test.edit(originalPrimary)
+			if err := os.WriteFile(dataFileV2, damaged, 0600); err != nil {
+				t.Fatal(err)
+			}
+			immutable := snapshotV2RecoveryImmutableFiles(t)
+			token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+			if err != nil {
+				t.Fatalf("prepare from damaged primary: %v", err)
+			}
+			assertV2RecoveryImmutableFiles(t, immutable)
+			assertFileBytes(t, dataFileV2, damaged)
+			requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
+			if err != nil || !requiresTOTP {
+				t.Fatalf("explicit recovery = (%v, %v), want TOTP challenge", requiresTOTP, err)
+			}
+			assertV2RecoveryImmutableFiles(t, immutable)
+			assertFileBytes(t, dataFileV2+".bak", backupBefore)
+			assertFileBytes(t, dataFileV2, backupBefore)
+			archives, err := filepath.Glob(dataFileV2 + ".corrupt-*")
+			if err != nil || len(archives) != 1 {
+				t.Fatalf("diagnostic archive paths = %v, %v", archives, err)
+			}
+			assertFileBytes(t, archives[0], damaged)
+			app.Logout()
+		})
+	}
+}
+
+func TestV2RecoveryRefusesUnsupportedPrimaryWithoutChangingFiles(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*cryptov2.Container)
+	}{
+		{name: "unsupported version", mutate: func(c *cryptov2.Container) { c.Version = 3 }},
+		{name: "unknown algorithm", mutate: func(c *cryptov2.Container) { c.AEAD = "future-aead" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, _ := activatedV2App(t, syntheticMigrationVault())
+			app.Logout()
+			original, err := os.ReadFile(dataFileV2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var container cryptov2.Container
+			if err := json.Unmarshal(original, &container); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&container)
+			unsupported, err := json.Marshal(container)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(dataFileV2, unsupported, 0600); err != nil {
+				t.Fatal(err)
+			}
+			immutable := snapshotV2RecoveryImmutableFiles(t)
+			primaryBefore, _ := os.ReadFile(dataFileV2)
+			if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); !errors.Is(err, ErrVaultUnsupportedFormat) {
+				t.Fatalf("unsupported container error = %v", err)
+			}
+			assertV2RecoveryImmutableFiles(t, immutable)
+			assertFileBytes(t, dataFileV2, primaryBefore)
+			assertNoCorruptArchive(t)
+		})
+	}
+
+	t.Run("truncated header declares future version", func(t *testing.T) {
+		app, _ := activatedV2App(t, syntheticMigrationVault())
+		app.Logout()
+		future := []byte(`{"format":"passwordsaver-v2","version":9,`)
+		if err := os.WriteFile(dataFileV2, future, 0600); err != nil {
+			t.Fatal(err)
+		}
+		immutable := snapshotV2RecoveryImmutableFiles(t)
+		if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); !errors.Is(err, ErrVaultUnsupportedFormat) {
+			t.Fatalf("truncated unsupported header error = %v", err)
+		}
+		assertV2RecoveryImmutableFiles(t, immutable)
+		assertFileBytes(t, dataFileV2, future)
+		assertNoCorruptArchive(t)
+	})
+}
+
+func TestV2RecoveryRejectsValidPrimaryWithoutChangingFiles(t *testing.T) {
+	app, _ := activatedV2App(t, syntheticMigrationVault())
+	app.Logout()
+	immutable := snapshotV2RecoveryImmutableFiles(t)
+	primary, err := os.ReadFile(dataFileV2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); err == nil {
+		t.Fatal("recovery was prepared while the primary still authenticated")
+	}
+	assertV2RecoveryImmutableFiles(t, immutable)
+	assertFileBytes(t, dataFileV2, primary)
+	assertNoCorruptArchive(t)
+}
+
+func TestV2RecoveryCannotOverlaySessionWaitingForTOTP(t *testing.T) {
+	app, _ := activatedV2App(t, syntheticMigrationVault())
+	app.Logout()
+	needsTOTP, err := app.LoginV2(migrationTestPassword)
+	if err != nil || !needsTOTP {
+		t.Fatalf("LoginV2 = (%v, %v), want TOTP pending", needsTOTP, err)
+	}
+	app.mu.RLock()
+	pendingSession := app.v2Session
+	app.mu.RUnlock()
+	immutable := snapshotV2RecoveryImmutableFiles(t)
+	if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); err == nil {
+		t.Fatal("recovery started over a session waiting for TOTP")
+	}
+	assertV2RecoveryImmutableFiles(t, immutable)
+	app.mu.RLock()
+	stillPending := app.v2Session == pendingSession && app.vault != nil && !app.twoFAVerified
+	app.mu.RUnlock()
+	if !stillPending {
+		t.Fatal("recovery attempt changed or discarded the pending authentication session")
+	}
+	app.Logout()
+}
+
+func TestV2RecoveryRequiresNoActiveV1Session(t *testing.T) {
+	for _, pendingTOTP := range []bool{false, true} {
+		name := "fully authenticated v1 session"
+		vault := &Vault{Accounts: []Account{{ID: "v1-session"}}}
+		if pendingTOTP {
+			name = "v1 session waiting for TOTP"
+			vault.TwoFAEnabled = true
+			vault.TwoFASecret = "JBSWY3DPEHPK3PXP"
+		}
+		t.Run(name, func(t *testing.T) {
+			withVaultDir(t)
+			cm, err := crypto.NewCryptoManager(migrationTestPassword)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cm.Wipe()
+			if err := SaveVault(cm, vault); err != nil {
+				t.Fatal(err)
+			}
+			app := NewApp()
+			requiresTOTP, err := app.Login(migrationTestPassword)
+			if err != nil || requiresTOTP != pendingTOTP {
+				t.Fatalf("v1 login = (%v, %v)", requiresTOTP, err)
+			}
+			app.mu.RLock()
+			activeManager, activeVault := app.cm, app.vault
+			app.mu.RUnlock()
+			if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); err == nil {
+				t.Fatal("v2 recovery started while a v1 session was active")
+			}
+			app.mu.RLock()
+			unchanged := app.cm == activeManager && app.vault == activeVault && app.cm != nil
+			app.mu.RUnlock()
+			if !unchanged {
+				t.Fatal("recovery attempt overlapped or discarded the active v1 session")
+			}
+			app.Logout()
+		})
+	}
+}
+
+func TestV2RecoveryRestoresTOTPSettingFromOlderBackup(t *testing.T) {
+	older := &Vault{Accounts: []Account{{ID: "older", Password: "synthetic"}}}
+	app, engine := activatedV2App(t, older)
+	app.Logout()
+	newer := &Vault{Accounts: []Account{{ID: "newer", Password: "synthetic"}}, TwoFAEnabled: true, TwoFASecret: "JBSWY3DPEHPK3PXP"}
+	if err := SaveV2Vault(dataFileV2, engine, migrationTestPassword, newer); err != nil {
+		t.Fatal(err)
+	}
+	backupBefore, err := os.ReadFile(dataFileV2 + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptV2Primary(t)
+	immutable := snapshotV2RecoveryImmutableFiles(t)
+	token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
+	if err != nil || requiresTOTP {
+		t.Fatalf("restore pre-TOTP backup = (%v, %v), want no TOTP challenge", requiresTOTP, err)
+	}
+	assertV2RecoveryImmutableFiles(t, immutable)
+	assertFileBytes(t, dataFileV2+".bak", backupBefore)
+	app.mu.RLock()
+	restoredWithoutTOTP := app.vault != nil && !app.vault.TwoFAEnabled && app.twoFAVerified
+	app.mu.RUnlock()
+	if !restoredWithoutTOTP {
+		t.Fatal("recovery did not restore the authorization settings contained in the old backup")
+	}
+	app.Logout()
+}
+
+type v2RecoveryImmutableSnapshot map[string][]byte
+
+func snapshotV2RecoveryImmutableFiles(t *testing.T) v2RecoveryImmutableSnapshot {
+	t.Helper()
+	snapshot := make(v2RecoveryImmutableSnapshot)
+	for _, path := range []string{dataFileV2 + ".bak", dataFile, dataFile + ".bak", vaultSelectorFile} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read recovery preservation snapshot %s: %v", path, err)
+		}
+		snapshot[path] = append([]byte(nil), data...)
+	}
+	return snapshot
+}
+
+func assertV2RecoveryImmutableFiles(t *testing.T, snapshot v2RecoveryImmutableSnapshot) {
+	t.Helper()
+	for path, expected := range snapshot {
+		assertFileBytes(t, path, expected)
+	}
+}
+
+func assertFileBytes(t *testing.T, path string, expected []byte) {
+	t.Helper()
+	actual, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(actual, expected) {
+		t.Fatalf("file %s changed: %v", path, err)
+	}
+}
+
+func assertNoCorruptArchive(t *testing.T) {
+	t.Helper()
+	archives, err := filepath.Glob(dataFileV2 + ".corrupt-*")
+	if err != nil || len(archives) != 0 {
+		t.Fatalf("unexpected diagnostic archives = %v, %v", archives, err)
+	}
+}
+
+func damageV2Tag(original []byte) []byte {
+	var container cryptov2.Container
+	if err := json.Unmarshal(original, &container); err != nil {
+		panic(err)
+	}
+	ciphertext, err := decodeB64(container.Ciphertext)
+	if err != nil {
+		panic(err)
+	}
+	ciphertext[len(ciphertext)-1] ^= 1
+	container.Ciphertext = encodeB64(ciphertext)
+	damaged, err := json.Marshal(container)
+	if err != nil {
+		panic(err)
+	}
+	return damaged
 }
 
 func TestV2RecoveryCancelAndExpiryClosePendingKey(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	cryptov2 "password-saver/crypto/v2"
@@ -36,9 +37,14 @@ type v2RecoveryChallenge struct {
 func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.clearPendingV2RecoveryLocked()
-	if !a.isLockedLocked() {
-		return "", errors.New("восстановление доступно только на экране входа")
+	// A session waiting for TOTP is still a live, password-authenticated
+	// session with key material. isLockedLocked alone is insufficient because
+	// it also returns true while the second factor is pending.
+	if a.cm != nil || a.v2Session != nil || a.vault != nil || a.twoFAVerified {
+		return "", errors.New("восстановление доступно только после полного выхода из хранилища")
+	}
+	if a.pendingRecover.cm != nil || a.pendingV2Recover.session != nil {
+		return "", errors.New("сначала отмените или дождитесь завершения предыдущей операции восстановления")
 	}
 	if err := a.checkTOTPAttemptsLocked(); err != nil {
 		return "", err
@@ -67,6 +73,9 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 		// diagnostics, including non-regular or over-limit files.
 		return "", primaryErr
 	} else {
+		if recoveryHeaderIsUnsupported(primaryBytes) {
+			return "", ErrVaultUnsupportedFormat
+		}
 		if primaryVault, openErr := decryptV2VaultData(primaryBytes, engine, password); openErr == nil {
 			wipeVault(primaryVault)
 			return "", errors.New("основное хранилище открывается; восстановление резервной копии не требуется")
@@ -122,6 +131,82 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 		}
 	})
 	return token, nil
+}
+
+// recoveryHeaderIsUnsupported inspects format metadata independently of the
+// canonical parser. This deliberately blocks backup recovery if even a
+// partially readable header declares another format, version, AEAD, or KDF.
+// Corrupt bytes without recognizable future-format metadata can proceed only
+// through backup authentication and the separate user confirmation.
+func recoveryHeaderIsUnsupported(data []byte) bool {
+	fields := readPartialJSONObject(data)
+	format, hasFormat := rawJSONString(fields["format"])
+	version, hasVersion := rawJSONUint(fields["version"])
+	aead, hasAEAD := rawJSONString(fields["aead"])
+	if hasFormat && format != cryptov2.FormatID {
+		return true
+	}
+	if hasFormat && format == cryptov2.FormatID && hasVersion && version != cryptov2.FormatVersion {
+		return true
+	}
+	if hasFormat && hasAEAD && aead != cryptov2.AEADAES256GCM {
+		return true
+	}
+	if hasFormat {
+		var kdf struct {
+			ID      string `json:"id"`
+			Version uint32 `json:"version"`
+		}
+		if json.Unmarshal(fields["kdf"], &kdf) == nil &&
+			(kdf.ID != cryptov2.KDFArgon2id || kdf.Version != cryptov2.Argon2idVersion) {
+			return true
+		}
+	}
+	return false
+}
+
+// readPartialJSONObject retains top-level values decoded before a JSON parse
+// error. Recovery must still recognize an unsupported version or algorithm
+// when later bytes in that container are truncated or damaged.
+func readPartialJSONObject(data []byte) map[string]json.RawMessage {
+	fields := make(map[string]json.RawMessage)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return fields
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			break
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			break
+		}
+		fields[key] = append(json.RawMessage(nil), value...)
+	}
+	return fields
+}
+
+func rawJSONString(value json.RawMessage) (string, bool) {
+	var result string
+	if len(value) == 0 || json.Unmarshal(value, &result) != nil {
+		return "", false
+	}
+	return result, true
+}
+
+func rawJSONUint(value json.RawMessage) (uint64, bool) {
+	if len(value) == 0 {
+		return 0, false
+	}
+	result, err := strconv.ParseUint(string(value), 10, 64)
+	return result, err == nil
 }
 
 // ConfirmV2VaultRecovery archives a damaged primary without replacing it in

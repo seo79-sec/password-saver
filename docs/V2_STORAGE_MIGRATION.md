@@ -43,5 +43,5 @@ A future activation step must be separate and explicit: authenticate both format
 - The UI and normal `SaveVault`/`LoadVault` paths do not call this v2 layer.
 - AEAD authentication failure cannot uniquely identify wrong-password versus authenticated-byte damage.
 - Process-level locking does not prevent an unrelated process from editing files. Migration detects persistent source changes around the operation but cannot provide a universal cross-platform external lock.
-- No migration cancellation/resume journal, stale temporary-file cleanup, v2 backup recovery flow, or active-format switch exists yet.
+- No migration cancellation/resume journal, stale temporary-file cleanup, or anti-rollback freshness record exists yet. The active-format switch and explicit v2 backup recovery flow are implemented; recovery never falls back to v1.
 - Memory clearing is best effort in Go; strings, compiler/runtime copies, and cryptographic internals cannot be guaranteed erased.

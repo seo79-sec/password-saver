@@ -208,11 +208,15 @@ func activatedV2App(t *testing.T, vault *Vault) (*App, *cryptov2.Engine) {
 	t.Helper()
 	engine, _, _, _ := createV1AndPreparedV2(t, vault)
 	service, token := prepareActivation(t, engine, vault)
-	if err := service.Confirm(token, migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err != nil {
+	code := ""
+	if vault.TwoFAEnabled {
+		code = currentCode(t, vault.TwoFASecret)
+	}
+	if err := service.Confirm(token, migrationTestPassword, code, engine); err != nil {
 		t.Fatal(err)
 	}
 	app := NewApp()
-	if err := app.unlockActiveV2ForBackend(migrationTestPassword, currentCode(t, vault.TwoFASecret), engine); err != nil {
+	if err := app.unlockActiveV2ForBackend(migrationTestPassword, code, engine); err != nil {
 		t.Fatal(err)
 	}
 	return app, engine

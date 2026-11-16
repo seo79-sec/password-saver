@@ -61,9 +61,25 @@ AEAD cannot distinguish a wrong master password from damage to the authenticated
 ## Standard recovery behavior
 
 When the active v2 primary is damaged or missing, the UI offers recovery only
-if a `.bak` exists. Go authenticates the backup, binds the challenge to the
-exact backup and primary snapshots, and waits for explicit confirmation. The
-damaged primary is copied to a unique `.corrupt-*` file before the verified
-backup bytes atomically replace it. The v2 selector is not changed and v1 is
-not consulted. A valid primary cannot be replaced by an older backup. A failed
-or canceled operation clears the pending v2 session and leaves the app locked.
+if a `.bak` exists. Go authenticates and parses the backup, binds the challenge
+to the exact backup and primary snapshots, and waits for explicit confirmation.
+An empty file, arbitrary bytes, a truncated container, a malformed supported
+container, or a supported container whose AEAD authentication fails can be
+treated as damaged. A recognizable unsupported format/version, algorithm, or
+KDF is refused even if later JSON is truncated; a valid v1-shaped file is also
+refused. A valid current v2 Vault cannot be replaced by an older backup. The
+damaged primary is copied byte-for-byte to a unique `.corrupt-*` archive before
+the already-verified backup bytes atomically replace it. The v2 selector,
+backup, and v1 primary/backup are not changed by recovery. There is no fallback
+to v1. A failed or canceled operation clears the pending v2 session and leaves
+the app locked.
+
+Recovery restores authorization settings from the backup snapshot. If it
+predates enabling TOTP, the restored vault has TOTP disabled and does not prompt
+for that second factor. The UI calls this out before the separate confirmation.
+The selector and local files are not protected against an attacker with full
+filesystem control; such an attacker can replace both primary and backup or
+roll back selector state. This flow prevents accidental or implicit rollback,
+but cannot prove that a valid backup is the newest copy. Users who need stronger
+freshness guarantees need an independently protected version counter or a
+trusted external recovery record; neither is part of the current format.
