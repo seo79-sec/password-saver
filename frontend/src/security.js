@@ -66,6 +66,45 @@ export function toggleSecretVisibility(visibleIDs, id) {
   return next;
 }
 
+export function loginModeForVaultStatus(status) {
+  if (status?.state === 'v2-active') return 'v2';
+  if (status?.state === 'v1-active') return 'v1';
+  if (status?.state === 'v1-prepared' && status.v2ContainerPresent) return 'v1';
+  return 'blocked';
+}
+
+export function friendlyBackendError(error) {
+  const message = String(error?.message ?? error ?? '').toLowerCase();
+  if (/authentication failed|incorrect .*master password|wrong.*password|неверный мастер-пароль/.test(message)) {
+    return 'Мастер-пароль неверен или данные хранилища повреждены.';
+  }
+  if (/password.*(12 characters|12 symbols|at least 12)|парол.*(12 символ|12 знак)/.test(message)) {
+    return 'Для контейнера v2 нужен мастер-пароль не короче 12 символов. Исходное хранилище v1 осталось без изменений.';
+  }
+  if (/неверный код 2fa|2fa verification failed|invalid.*totp/.test(message)) {
+    return 'Неверный код двухфакторной аутентификации.';
+  }
+  if (/activation challenge.*expired|confirmation.*expired|activation.*denied/.test(message)) {
+    return 'Срок подтверждения истёк. Повторно проверьте хранилище и начните подтверждение заново.';
+  }
+  if (/stale|source changed|changed outside this session/.test(message)) {
+    return 'Данные изменились после подготовки. Обновите проверку и повторите операцию.';
+  }
+  if (/commit is uncertain|synchronization.*uncertain|directory sync/.test(message)) {
+    return 'Результат записи не удалось подтвердить. Проверьте состояние хранилища перед повтором.';
+  }
+  if (/no space left|disk full|not enough space|ошибка 112/.test(message)) {
+    return 'Недостаточно места для безопасной записи хранилища.';
+  }
+  if (/ambiguous|selector state is damaged|unknown.*format/.test(message)) {
+    return 'Состояние формата хранилища повреждено или неоднозначно. Автоматического перехода между форматами не будет.';
+  }
+  if (/v2.*(missing|damaged|invalid)|active v2.*file/.test(message)) {
+    return 'Активный контейнер v2 отсутствует или повреждён. Данные v1 автоматически не открываются.';
+  }
+  return 'Операция не выполнена. Проверьте ввод и состояние хранилища.';
+}
+
 // Clipboard reads can be denied by the OS/browser. In that case, leave its
 // current contents untouched rather than risking erasing a newer copy.
 export async function clearClipboardIfUnchanged(clipboard, expected) {

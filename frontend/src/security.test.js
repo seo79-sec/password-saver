@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords } from './security.js';
+import { clearClipboardIfUnchanged, validChoice, isSecretVisible, toggleSecretVisibility, createGenerationGuard, resolveForGeneration, checkHIBPPasswords, loginModeForVaultStatus, friendlyBackendError } from './security.js';
 
 function deferred() {
   let resolve;
@@ -33,6 +33,23 @@ test('denied clipboard read rejects without writing', async () => {
 test('preferences accept supported choices and fall back safely', () => {
   assert.equal(validChoice('10', [1, 5, 10, 15], 1), 10);
   assert.equal(validChoice('999', [1, 5, 10, 15], 1), 1);
+});
+
+test('vault status chooses only the selected login path and blocks ambiguous state', () => {
+  assert.equal(loginModeForVaultStatus({ state: 'v1-active' }), 'v1');
+  assert.equal(loginModeForVaultStatus({ state: 'v1-prepared', v2ContainerPresent: true }), 'v1');
+  assert.equal(loginModeForVaultStatus({ state: 'v1-prepared', v2ContainerPresent: false }), 'blocked');
+  assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
+  assert.equal(loginModeForVaultStatus({ state: 'ambiguous' }), 'blocked');
+  assert.equal(loginModeForVaultStatus(null), 'blocked');
+});
+
+test('backend errors are rendered as safe actionable messages', () => {
+  assert.match(friendlyBackendError(new Error('v2 vault authentication failed')), /Мастер-пароль/);
+  assert.match(friendlyBackendError('v2 activation challenge expired'), /истёк/);
+  assert.match(friendlyBackendError('active v2 vault is missing'), /автоматически не открываются/);
+  assert.match(friendlyBackendError('master password must be at least 12 characters'), /12 символов/);
+  assert.doesNotMatch(friendlyBackendError('unexpected secret-bearing error'), /unexpected secret-bearing error/);
 });
 
 test('password visibility is hidden initially and toggles per record', () => {

@@ -242,11 +242,33 @@ type v2ActivationService struct {
 	pendingCancel *cancelPreparationChallenge
 }
 
+func (s *v2ActivationService) clearChallenges() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pending = nil
+	s.pendingCancel = nil
+	s.mu.Unlock()
+}
+
 const activationChallengeLifetime = 2 * time.Minute
 
 var activationChallengeToken = newChallengeToken
 
 func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string, engine *cryptov2.Engine) (string, error) {
+	return s.prepare(directory, masterPassword, totpCode, engine, nil)
+}
+
+// prepareForSession adds a check against the Vault already open in the
+// authenticated App session. The public internal preparation path still
+// authenticates both files itself; this extra comparison binds UI migration
+// to the exact data the user currently unlocked.
+func (s *v2ActivationService) prepareForSession(directory, masterPassword, totpCode string, engine *cryptov2.Engine, expected *Vault) (string, error) {
+	return s.prepare(directory, masterPassword, totpCode, engine, expected)
+}
+
+func (s *v2ActivationService) prepare(directory, masterPassword, totpCode string, engine *cryptov2.Engine, expected *Vault) (string, error) {
 	if s == nil || engine == nil {
 		return "", ErrVaultSelectionAmbiguous
 	}
@@ -302,6 +324,9 @@ func (s *v2ActivationService) Prepare(directory, masterPassword, totpCode string
 	defer wipeVault(v2Vault)
 	if !reflect.DeepEqual(v1Vault, v2Vault) {
 		return "", ErrVaultV2StalePreparation
+	}
+	if expected != nil && !reflect.DeepEqual(v1Vault, expected) {
+		return "", ErrVaultMigrationSourceChanged
 	}
 	if err := validateActivationTOTP(v1Vault, totpCode); err != nil {
 		return "", err

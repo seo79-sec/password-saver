@@ -25,6 +25,8 @@ type App struct {
 	ctx              context.Context
 	cm               *crypto.CryptoManager
 	v2Session        *v2VaultSession
+	v2Engine         *cryptov2.Engine
+	v2Activation     *v2ActivationService
 	vault            *Vault
 	twoFAVerified    bool // НОВОЕ: Флаг успешного прохождения 2FA
 	pendingReset     resetChallenge
@@ -52,7 +54,7 @@ const challengeLifetime = 2 * time.Minute
 var recoveryChallengeLifetime = challengeLifetime
 
 func NewApp() *App {
-	return &App{idleTimeout: time.Minute}
+	return &App{idleTimeout: time.Minute, v2Activation: &v2ActivationService{}}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -139,6 +141,9 @@ func (a *App) logoutLocked() {
 	if a.v2Session != nil {
 		a.v2Session.close()
 		a.v2Session = nil
+	}
+	if a.v2Activation != nil {
+		a.v2Activation.clearChallenges()
 	}
 	wipeVault(a.vault)
 	a.vault = nil
@@ -260,6 +265,10 @@ func (a *App) unlockActiveV2ForBackend(password, totpCode string, engine *crypto
 func (a *App) confirmV2Activation(service *v2ActivationService, token, password, totpCode string, engine *cryptov2.Engine) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.confirmV2ActivationLocked(service, token, password, totpCode, engine)
+}
+
+func (a *App) confirmV2ActivationLocked(service *v2ActivationService, token, password, totpCode string, engine *cryptov2.Engine) error {
 	err := service.Confirm(token, password, totpCode, engine)
 	vaultActivationMu.Lock()
 	selection, selectionErr := resolveVaultSelectionLocked(".")
@@ -721,8 +730,9 @@ func (a *App) ConfirmAndEnable2FA(secret, code string) error {
 func (a *App) Verify2FA(code string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	// Если нет крипто-менеджера, значит мастер-пароль еще не вводили
-	if a.cm == nil || a.vault == nil {
+	// Either format can hold a pending password-authenticated session. The
+	// second factor is always checked in Go before account methods unlock.
+	if (a.cm == nil && a.v2Session == nil) || a.vault == nil {
 		return errors.New("сначала введите мастер-пароль")
 	}
 	if a.twoFAVerified {
