@@ -9,7 +9,14 @@ use AES-256-GCM by default and the Standard registry accepts only
 modular for a future provider; no algorithm-specific branch is added to the
 vault or UI.
 
-New installations create a native v2 AES-256-GCM container and an encrypted\nbackup directly, without first writing v1. Initialization uses a distinct\n`nativeV2` selector flag and does not touch existing files. A new folder\nrequires an explicit master-password creation step (at least 12 characters).\nPartial setup artifacts block automatic retries rather than silently replacing\nfiles; inspect them in a disposable test folder before resetting.\n\nStandard continues to read the existing v1 `vault_data.enc` format and keeps
+New installations create a native v2 AES-256-GCM container and an encrypted
+backup directly, without first writing v1. Initialization uses a distinct
+`nativeV2` selector flag and does not touch existing files. A new folder
+requires an explicit master-password creation step (at least 12 characters).
+Partial setup artifacts block automatic retries rather than silently replacing
+files; inspect them in a disposable test folder before resetting.
+
+Standard continues to read the existing v1 `vault_data.enc` format and keeps
 its explicit, user-confirmed migration to the v2 container. The v1 format and
 active files are not rewritten by a release or by opening the application.
 V2 records carry their algorithm ID; unsupported IDs fail closed, with no

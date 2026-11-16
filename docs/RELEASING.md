@@ -1,6 +1,6 @@
 # Preparing a PasswordSaver Standard 2.0.0 Windows release
 
-This project currently prepares a Windows x64 executable. Release preparation does not create or publish a GitHub Release.
+This project builds the Windows x64 Standard executable. Release candidate preparation does not publish a GitHub Release. A separate manual workflow creates a **draft release** with verified archive checksums; public publication remains a separate, human-approved action.
 
 ## Build the candidate
 
@@ -36,11 +36,14 @@ Before making a release public:
 3. Review the [2.0.0 changelog](../CHANGELOG.md), `wails.json` product version, Standard edition metadata, binary checksum, and packaged startup on a clean machine with WebView2 Runtime.
 4. Ensure no `vault_data.enc`, `.bak`, diagnostic archive, or test secret is included with release assets.
 
-## Publish manually after approval
+## Create the release draft and publish after approval
 
-1. Create and push the annotated tag `v2.0.0` at the approved `main` commit.
-2. In GitHub, choose **Releases → Draft a new release**, select `v2.0.0`, and use the 2.0.0 changelog as release notes.
-3. Attach `password-saver.exe` and `password-saver.exe.sha256` from the reviewed candidate. Verify the checksum against the uploaded executable.
-4. Save as a draft for review. Publish only after the release owner explicitly approves.
+1. Merge the reviewed release packaging PR into `main` after all required checks pass on its commit.
+2. In **Actions → Publish PasswordSaver Standard 2.0.0 draft → Run workflow**, select `main`. The workflow runs Go/frontend tests, Windows Wails build, checks the archive and SHA-256 values, creates a tag `v2.0.0` at exactly the workflow commit, and creates a **draft release** (not public).
+3. Verify that the draft includes `PasswordSaver-Standard-2.0.0-Windows-x64.zip` and `.zip.sha256`. Download and independently verify both the ZIP hash and the inner `password-saver.exe.sha256`.
+4. Run and document the final Windows manual test plan against this exact binary. Review `docs/RELEASE_NOTES_V2.0.0.md` and the SHA-256 checksums.
+5. Only after approval, press **Publish release** on the draft in GitHub. Do not edit or replace assets without a new security review.
+
+Do not run the draft workflow on a feature branch, force-move tags, or publish a release before verifying the binary.
 
 Do not commit or upload a real vault or any user data. Re-check the artifact contents before attaching files.
