@@ -143,8 +143,13 @@ func (a *App) LoginV2(password string) (bool, error) {
 	a.vault = vault
 	needsTOTP := vault.TwoFAEnabled
 	a.twoFAVerified = !needsTOTP
-	a.totpFailures = 0
-	a.totpBlockedUntil = time.Time{}
+	// A correct master password alone must not reset the TOTP attempt budget.
+	// Only successful second-factor verification (or a vault without 2FA)
+	// may clear the counter and lockout state.
+	if !needsTOTP {
+		a.totpFailures = 0
+		a.totpBlockedUntil = time.Time{}
+	}
 	a.lastActivity = time.Now()
 	a.armIdleTimerLocked()
 	return needsTOTP, nil
