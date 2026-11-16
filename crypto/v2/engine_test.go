@@ -23,6 +23,22 @@ func testEngine(t *testing.T) *Engine {
 	return engine
 }
 
+func TestStandardEngineDefaultsToAES256GCMOnly(t *testing.T) {
+	engine, err := NewEngine(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine.algorithmID != AEADAES256GCM {
+		t.Fatalf("default algorithm = %q, want %q", engine.algorithmID, AEADAES256GCM)
+	}
+	if len(engine.algorithms) != 1 {
+		t.Fatalf("standard registry contains %d algorithms, want AES-256-GCM only", len(engine.algorithms))
+	}
+	if _, ok := engine.algorithms[AEADAES256GCM]; !ok {
+		t.Fatal("standard registry has no AES-256-GCM provider")
+	}
+}
+
 func TestEncryptDecryptRoundTrip(t *testing.T) {
 	engine := testEngine(t)
 	plaintext := []byte(`{"accounts":[{"password":"synthetic-only-secret"}]}`)

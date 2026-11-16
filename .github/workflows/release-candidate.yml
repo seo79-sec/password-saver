@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: password-saver-v1.1.0-windows-amd64
+          name: password-saver-standard-v2.0.0-windows-amd64
           path: |
             build/bin/password-saver.exe
             build/bin/password-saver.exe.sha256

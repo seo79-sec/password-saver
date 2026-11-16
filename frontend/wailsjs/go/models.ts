@@ -37,6 +37,7 @@ export namespace main {
 	export class VaultPublicStatus {
 	    state: string;
 	    v2ContainerPresent: boolean;
+	    v2BackupPresent: boolean;
 	    preparationFresh: boolean;
 
 	    static createFrom(source: any = {}) {
@@ -47,6 +48,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.state = source["state"];
 	        this.v2ContainerPresent = source["v2ContainerPresent"];
+	        this.v2BackupPresent = source["v2BackupPresent"];
 	        this.preparationFresh = source["preparationFresh"];
 	    }
 	}

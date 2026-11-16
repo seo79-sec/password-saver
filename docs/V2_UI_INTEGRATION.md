@@ -1,8 +1,8 @@
-# PasswordSaver 2.0 — Wails and Svelte v2 integration
+# PasswordSaver Standard 2.0 — Wails and Svelte v2 integration
 
 ## Format status and login
 
-At startup the frontend asks Go for `GetVaultStatus()`. The response contains only a public state (`v1-active`, `v1-prepared`, `v2-active`, or `ambiguous`) and whether a v2 file is present/fresh. It contains no passwords, TOTP secret, container hashes, DEK, KEK, or session internals. Go remains responsible for validating the selector and choosing the login API. An ambiguous selector blocks both login paths; an active v2 selector always routes to `LoginV2`, even when its container is missing or damaged.
+At startup the frontend asks Go for `GetVaultStatus()`. The response contains only a public state (`v1-active`, `v1-prepared`, `v2-active`, or `ambiguous`) and whether a v2 file, backup, or fresh candidate is present. It contains no passwords, TOTP secret, container hashes, DEK, KEK, or session internals. Go remains responsible for validating the selector and choosing the login API. An ambiguous selector blocks both login paths; an active v2 selector always routes to `LoginV2`, even when its container is missing or damaged.
 
 The v1 login and its TOTP step remain available for v1-active and v1-prepared. The v2 login opens an opaque `crypto/v2.Session` in Go. The password is passed only to the login call; the session retains the DEK and the backend holds the decrypted Vault for the existing CRUD APIs. If TOTP is enabled, the session remains locked until Go accepts `Verify2FA`. Wrong TOTP codes use the existing attempt limit. Logout, inactivity timeout, or a detected file change closes the session. Existing account listing, add, edit, delete, search, categories, password generation, clipboard, password visibility, and 2FA operations use the same App methods; v2 saves route through the v2 session and never call the v1 writer.
 
@@ -18,7 +18,7 @@ The **Cancel preparation** action uses a separate begin/confirm challenge. It ca
 
 - Wrong password, authenticated-container damage, wrong TOTP, and expired activation are shown as separate, nonsecret messages.
 - Stale files require a new authenticated preparation. External changes close the v2 session and prevent stale saves.
-- A missing or corrupt active-v2 container does not fall back to v1 or a backup. The status stays v2-active and the login reports that the v2 container is unavailable.
+- A missing or corrupt active-v2 container does not automatically fall back to v1 or restore a backup. When a backup exists, the login screen offers a separate recovery action: Go verifies it with the supplied password and issues a confirmation challenge. Confirmation is bound to the exact backup and primary snapshots, archives the damaged primary, then restores the same verified backup bytes. The selector remains v2-active. Restoring a backup can lose later saves and the dialog says so.
 - Disk-full and uncertain-sync errors do not report a successful save. After an uncertain commit, the backend closes the session and asks the user to verify the active format/content before retrying.
 - Ambiguous or damaged selectors block login and reset/recovery actions. Cancellation is offered only when strict selector validation confirms v1-prepared.
 
@@ -31,8 +31,9 @@ Use a disposable Windows account/profile and synthetic data such as `test@exampl
 3. Reopen the app while the selector remains v1-prepared. Verify v1 login is still selected. Prepare again, then explicitly cancel. Verify both v1 files and the v2 candidate still exist and v1 backup recovery controls are available.
 4. Prepare again, confirm v2 activation, and log in using the v2 password and TOTP. Verify account contents and categories match the original. Exercise add/edit/delete, password generation, visibility, copy, TOTP setup/verification, manual lock, and the configured inactivity timeout.
 5. Restart and verify status remains v2-active and login opens v2. Verify the v1 login path does not open v1 while v2 is active. In a disposable copy only, remove or damage the v2 file and confirm the UI reports unavailable without fallback.
-6. In a separate disposable copy, corrupt or replace the selector with unknown JSON and confirm login is blocked. Check that cancellation is not offered for this state and v1/v2 files are untouched.
-7. Test a read-only destination and a full-disk or simulated write failure if the Windows test harness supports it. Confirm errors are visible and no success state is shown.
+6. In a disposable copy, damage the active v2 primary and choose explicit backup recovery. Verify wrong password and cancellation leave both files unchanged; confirm with the correct password and verify the damaged primary archive, unchanged backup, active selector, and restored contents. Repeat with a missing primary and verify no v1 fallback.
+7. In a separate disposable copy, corrupt or replace the selector with unknown JSON and confirm login is blocked. Check that cancellation and v2 recovery are not offered for this state and v1/v2 files are untouched.
+8. Test a read-only destination and a full-disk or simulated write failure if the Windows test harness supports it. Confirm errors are visible and no success state is shown.
 
 ## Limits
 
