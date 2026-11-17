@@ -1,5 +1,7 @@
 :root {
   color-scheme: light;
+  background-color:var(--bg);
+  color:var(--text);
   --bg:#f5f8fe; --sidebar:#f8faff; --surface:#fff; --surface-soft:#f6f9ff;
   --text:#14213d; --muted:#607189; --blue:#126de0; --blue-hover:#0a62d7; --button-blue:#126de0;
   --active:#e0edff; --border:#e5ebf5; --success:#16874f; --danger:#c73648;

@@ -13,7 +13,7 @@
   import StorageStatusBar from './components/StorageStatusBar.svelte';
   import StorageDiagnostics from './components/StorageDiagnostics.svelte';
   import SettingsView from './components/SettingsView.svelte';
-  import { validView, createThemeController, auditPasswords, filterAccounts } from './ui.js';
+  import { validView, getThemeController, auditPasswords, filterAccounts } from './ui.js';
   import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
     PrepareStorageLocationMigration, ConfirmStorageLocationMigration, CancelStorageLocationMigration,
@@ -36,8 +36,8 @@
   let totpEnabled = false;
   let riskFilter = 'all';
   let breachState = 'idle';
-  let theme = 'light';
-  let themeController;
+  let themeController = getThemeController();
+  let theme = themeController.preference;
   let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
   let storageStatus = { state: 'loading', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false };
   let loginFormat = 'v1';
@@ -95,6 +95,8 @@
   let clipboardController;
   let lockPoll;
   let lastActivitySent = 0;
+  let componentAlive = true;
+  const statusGeneration = createGenerationGuard();
   const sessionGeneration = createGenerationGuard();
   const breachGeneration = createGenerationGuard();
   const migrationGeneration = createGenerationGuard();
@@ -106,15 +108,18 @@
 
   onMount(() => {
     refreshVaultStatus();
-    idleMinutes = validChoice(localStorage.getItem('idleLockMinutes'), IDLE_MINUTES, 1);
-    clipboardSeconds = validChoice(localStorage.getItem('clipboardClearSeconds'), CLIPBOARD_SECONDS, 15);
+    // Storage can be unavailable even when merely accessing its getter.
+    try {
+      idleMinutes = validChoice(localStorage.getItem('idleLockMinutes'), IDLE_MINUTES, 1);
+      clipboardSeconds = validChoice(localStorage.getItem('clipboardClearSeconds'), CLIPBOARD_SECONDS, 15);
+    } catch { /* Keep safe in-memory defaults. */ }
     SetIdleTimeout(idleMinutes).catch(() => {});
     clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => {
       toastMessage = 'Не удалось получить доступ к буферу обмена';
     });
-    themeController = createThemeController({ storage: localStorage, media: window.matchMedia('(prefers-color-scheme: dark)'), root: document.documentElement });
+    themeController = getThemeController();
     theme = themeController.preference;
-    return () => themeController.destroy();
+    return () => { componentAlive = false; statusGeneration.invalidate(); themeController.destroy(); };
   });
 
   function setTheme(value) { theme = themeController.set(value); }
@@ -207,11 +212,13 @@
   }
 
   function setIdlePreference(value) {
-    idleMinutes = validChoice(value, IDLE_MINUTES, 1); localStorage.setItem('idleLockMinutes', String(idleMinutes));
+    idleMinutes = validChoice(value, IDLE_MINUTES, 1);
+    try { localStorage.setItem('idleLockMinutes', String(idleMinutes)); } catch { /* In-memory preference still applies. */ }
     SetIdleTimeout(idleMinutes).catch(() => { toastMessage = 'Не удалось применить тайм-аут блокировки'; });
   }
   function setClipboardPreference(value) {
-    clipboardSeconds = validChoice(value, CLIPBOARD_SECONDS, 15); localStorage.setItem('clipboardClearSeconds', String(clipboardSeconds));
+    clipboardSeconds = validChoice(value, CLIPBOARD_SECONDS, 15);
+    try { localStorage.setItem('clipboardClearSeconds', String(clipboardSeconds)); } catch { /* In-memory preference still applies. */ }
     clipboardController?.cancel();
     clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => { toastMessage = 'Не удалось получить доступ к буферу обмена'; });
   }
@@ -496,10 +503,18 @@
   }
 
   async function refreshVaultStatus() {
-    try { storageStatus = await GetStorageLocationStatus(); }
-    catch (error) { storageStatus = { state: 'error', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false }; console.error(error); }
-    try { vaultStatus = await GetVaultStatus(); }
-    catch (error) { vaultStatus = { state: 'ambiguous', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false }; console.error(error); }
+    if (!componentAlive) return;
+    const request = statusGeneration.advance();
+    const session = sessionGeneration.capture();
+    const [storage, vault] = await Promise.allSettled([
+      Promise.resolve().then(GetStorageLocationStatus),
+      Promise.resolve().then(GetVaultStatus),
+    ]);
+    // Public metadata still needs ordering/lifetime guards: an older snapshot
+    // must not replace a newer reconciliation or cross an authentication epoch.
+    if (!componentAlive || !statusGeneration.isCurrent(request) || !sessionGeneration.isCurrent(session)) return;
+    storageStatus = storage.status === 'fulfilled' ? storage.value : { state:'error', path:'', legacyPaths:[] };
+    vaultStatus = vault.status === 'fulfilled' ? vault.value : { state:'ambiguous', v2ContainerPresent:false, v2BackupPresent:false, preparationFresh:false };
   }
 
   function openStorageMigrationModal() {
@@ -615,14 +630,18 @@
     migrationPassword = ''; migrationTotp = '';
     try {
       const token = await PrepareV2Migration(password, code);
-      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken) || !isLoggedIn) return;
+      if (!componentAlive || !sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken) || !isLoggedIn) return;
       activationToken = token;
       migrationStage = 'activate';
-      await refreshVaultStatus();
     } catch (error) {
-      if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken) && isLoggedIn) migrationError = friendlyBackendError(error);
+      if (componentAlive && sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken) && isLoggedIn) migrationError = friendlyBackendError(error);
     } finally {
       if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationBusy = false;
+      // Preparing can durably change the selector even if the dialog closed
+      // or the call failed/expired. Read CURRENT public metadata in a fresh
+      // request, independently of the discarded token/password and old epoch.
+      // This never reopens the modal or restores authorization; unmount is a no-op.
+      await refreshVaultStatus();
     }
   }
 

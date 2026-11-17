@@ -1,3 +1,7 @@
+import { installThemeRuntime } from './theme-runtime.js';
+const themeRuntime = installThemeRuntime(globalThis);
+export const { normalizeTheme, resolvedTheme, createThemeController, getThemeController } = themeRuntime;
+
 export const NAVIGATION = [
   { id: 'passwords', label: 'Мои пароли', icon: 'home' },
   { id: 'vaults', label: 'Хранилища', icon: 'layers' },
@@ -7,28 +11,6 @@ export const NAVIGATION = [
 ];
 export const CATEGORIES = ['Общие', 'Работа', 'Соцсети', 'Игры', 'Финансы'];
 export const validView = value => NAVIGATION.some(item => item.id === value) ? value : 'passwords';
-export const normalizeTheme = value => ['light', 'dark', 'system'].includes(value) ? value : 'light';
-export const resolvedTheme = (value, prefersDark) => normalizeTheme(value) === 'system' ? (prefersDark ? 'dark' : 'light') : normalizeTheme(value);
-
-export function createThemeController({ storage, media, root }) {
-  let preference;
-  try { preference = normalizeTheme(storage.getItem('theme')); } catch { preference = 'light'; }
-  const apply = () => { root.dataset.theme = resolvedTheme(preference, media.matches); };
-  const change = () => apply();
-  media.addEventListener('change', change);
-  apply();
-  return {
-    get preference() { return preference; },
-    set(value) {
-      preference = normalizeTheme(value);
-      try { storage.setItem('theme', preference); } catch { /* Session preference still works. */ }
-      apply();
-      return preference;
-    },
-    destroy() { media.removeEventListener('change', change); },
-  };
-}
-
 export function accountLabel(account) {
   const [title, category] = String(account.title || '').split('|||');
   return { title, category: category || 'Общие' };

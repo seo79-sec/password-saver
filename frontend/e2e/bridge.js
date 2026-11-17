@@ -14,9 +14,14 @@ export async function installBridge(page, options = {}) {
       storage:{ state:'ready',path:'C:\\Users\\Test\\AppData\\Local\\PasswordSaver\\vaults\\default',legacyPaths:[],format:'v2',algorithm:'AES-256-GCM',backupPresent:true,temporaryFiles:0,diagnostic:'', ...options.storage },
     };
     window.mock = state;
-    const later = key => new Promise(resolve => { state[key] = resolve; });
+    const later = key => new Promise((resolve, reject) => { state[key] = resolve; state['reject' + key.slice(7)] = reject; });
     const methods = {
-      GetStorageLocationStatus:async()=>copy(state.storage), GetVaultStatus:async()=>copy(state.vault),
+      GetStorageLocationStatus:async()=>copy(state.storage),
+      GetVaultStatus:async()=>{
+        const snapshot = copy(state.vault);
+        if(state.deferNextStatus) { state.deferNextStatus = false; return new Promise(resolve => state.releaseStatus = () => resolve(snapshot)); }
+        return snapshot;
+      },
       SetIdleTimeout:async()=>{},TouchActivity:async()=>{},CheckInactivity:async()=>state.locked,
       LoginV2:async()=>{state.locked=false;state.pending=state.totp;return state.totp;},
       Login:async()=>{state.locked=false;state.pending=state.totp;return state.totp;},
@@ -36,7 +41,11 @@ export async function installBridge(page, options = {}) {
       ConfirmStorageLocationMigration:async()=>{state.storage.state='ready';state.storage.legacyPaths=[];},
       PrepareV2VaultRecovery:async()=> 'synthetic-recovery-token', CancelV2VaultRecovery:async()=>{},
       ConfirmV2VaultRecovery:async()=>{state.locked=false;state.pending=state.totp;return state.totp;},
-      PrepareV2Migration:async()=>options.delayMigration?later('resolveMigration'):'synthetic-activation',
+      PrepareV2Migration:async()=>{
+        const token = options.delayMigration ? await later('resolveMigration') : 'synthetic-activation';
+        state.vault={...state.vault,state:'v1-prepared',v2ContainerPresent:true,preparationFresh:true};
+        return token;
+      },
       ConfirmV2Migration:async()=>{state.vault.state='v2-active';state.locked=true;},
       BeginCancelV2Preparation:async()=> 'synthetic-cancel', ConfirmCancelV2Preparation:async()=>{state.vault.state='v1-active';},
       CreateV2Vault:async()=>{state.vault.state='v2-active';},

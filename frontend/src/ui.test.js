@@ -1,3 +1,4 @@
+import { installThemeRuntime } from './theme-runtime.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createThemeController, normalizeTheme, resolvedTheme, validView, accountLabel, filterAccounts, auditPasswords } from './ui.js';
@@ -51,4 +52,34 @@ test('security counts include weak, reused and old passwords including special o
   assert.equal(filterAccounts(accounts, '', 'Все', 'weak').length, 2);
   assert.equal(filterAccounts(accounts, '', 'Все', 'reused').length, 2);
   assert.equal(filterAccounts(accounts, '', 'Все', 'breached').length, 0);
+});
+
+
+test('head bootstrap and App share one controller with idempotent cleanup', () => {
+  let listeners=0;
+  const root={dataset:{}};
+  const env={document:{documentElement:root},localStorage:{getItem:()=> 'system'},
+    matchMedia:()=>({matches:true,addEventListener(){listeners++;},removeEventListener(){listeners--;}})};
+  const runtime=installThemeRuntime(env);
+  assert.equal(root.dataset.theme,'dark');
+  assert.equal(listeners,1);
+  const controller=runtime.getThemeController();
+  assert.equal(installThemeRuntime(env),runtime);
+  assert.equal(runtime.getThemeController(),controller);
+  assert.equal(listeners,1);
+  controller.destroy();controller.destroy();
+  assert.equal(listeners,0);
+  runtime.getThemeController().destroy();
+  assert.equal(listeners,0);
+});
+
+test('bootstrap handles a throwing storage getter before first render', () => {
+  const root={dataset:{}};
+  const env={document:{documentElement:root},get localStorage(){throw Error('denied');},
+    matchMedia:()=>({matches:true,addEventListener(){},removeEventListener(){}})};
+  const runtime=installThemeRuntime(env);
+  assert.equal(root.dataset.theme,'light');
+  runtime.getThemeController().set('dark');
+  assert.equal(root.dataset.theme,'dark');
+  runtime.getThemeController().destroy();
 });

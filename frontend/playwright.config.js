@@ -5,5 +5,8 @@ export default defineConfig({
   use: { baseURL:'http://127.0.0.1:5173', viewport:{ width:1440,height:900 }, locale:'ru-RU', reducedMotion:'reduce',
     launchOptions: process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH, args:['--no-sandbox'] } : {},
   },
-  webServer: { command:'npm run dev -- --host 127.0.0.1 --port 5173 --strictPort', url:'http://127.0.0.1:5173', reuseExistingServer:!process.env.CI },
+  webServer: [
+    { command:'npm run dev -- --host 127.0.0.1 --port 5173 --strictPort', url:'http://127.0.0.1:5173', reuseExistingServer:!process.env.CI },
+    { command:'npm run preview -- --host 127.0.0.1 --port 5174 --strictPort', url:'http://127.0.0.1:5174', reuseExistingServer:!process.env.CI },
+  ],
 });
