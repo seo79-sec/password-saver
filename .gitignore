@@ -6,6 +6,8 @@ build/bin/
 # Файлы фронтенда (они скачаются сами через npm install)
 frontend/node_modules/
 frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 
 # ТВОИ ЛИЧНЫЕ ДАННЫЕ (Критически важно не пушить это на сервер!)
 vault_data.enc

@@ -1,8 +1,20 @@
 <script>
   import { onMount } from 'svelte';
-  import { fade, slide, fly } from 'svelte/transition';
-  import { flip } from 'svelte/animate';
-  import { 
+  import AppShell from './components/AppShell.svelte';
+  import Icon from './components/Icon.svelte';
+  import LoginView from './components/LoginView.svelte';
+  import Modal from './components/Modal.svelte';
+  import PasswordList from './components/PasswordList.svelte';
+  import PasswordEditor from './components/PasswordEditor.svelte';
+  import SearchAndFilters from './components/SearchAndFilters.svelte';
+  import SecurityCenter from './components/SecurityCenter.svelte';
+  import SecurityView from './components/SecurityView.svelte';
+  import StorageView from './components/StorageView.svelte';
+  import StorageStatusBar from './components/StorageStatusBar.svelte';
+  import StorageDiagnostics from './components/StorageDiagnostics.svelte';
+  import SettingsView from './components/SettingsView.svelte';
+  import { validView, createThemeController, auditPasswords, filterAccounts } from './ui.js';
+  import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
     PrepareStorageLocationMigration, ConfirmStorageLocationMigration, CancelStorageLocationMigration,
     SelectLegacyStorageDirectory, PrepareSelectedStorageLocationMigration, CancelLegacyStorageSelection,
@@ -12,14 +24,22 @@
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
-  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, isSecretVisible, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, storageDiagnosticNotice, friendlyBackendError } from './security.js';
+  import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
 
-  import logoImg from './assets/images/logo.png';
+
 
   let isLoggedIn = false;
+  let activeView = 'passwords';
+  let editorOpen = false;
+  let editorBusy = false;
+  let authBusy = false;
+  let totpEnabled = false;
+  let riskFilter = 'all';
+  let breachState = 'idle';
+  let theme = 'light';
+  let themeController;
   let vaultStatus = { state: 'loading', v2ContainerPresent: false, v2BackupPresent: false, preparationFresh: false };
   let storageStatus = { state: 'loading', path: '', legacyPaths: [], format: '', algorithm: '', backupPresent: false, migrationPending: false };
-  $: storageNotice = storageDiagnosticNotice(storageStatus);
   let loginFormat = 'v1';
   let setupMasterPassword = '';
   let setupConfirmPassword = '';
@@ -27,19 +47,18 @@
   let confirmNewVault = false;
   let masterPassword = '';
   let errorMessage = '';
-  let lockReason = ''; 
+  let lockReason = '';
   let recoveryBusy = false;
 
   let accounts = [];
-  
+
   let newTitle = '';
   let newLogin = '';
   let newPass = '';
-  let showFormPassword = false;
   let visiblePasswordIDs = new Set();
   let selectedCategory = 'Общие';
-  let editingId = null; 
-  
+  let editingId = null;
+
   let showAbout = false;
 
   let showMigrationModal = false;
@@ -64,9 +83,9 @@
   let storageMigrationError = '';
 
   // --- ЛОГИКА 2FA ---
-  let show2FAInput = false; 
+  let show2FAInput = false;
   let twoFACode = '';
-  
+
   let show2FASetupModal = false;
   let totpSecret = '';
   let totpQRCode = '';
@@ -78,11 +97,12 @@
   let lastActivitySent = 0;
   const sessionGeneration = createGenerationGuard();
   const breachGeneration = createGenerationGuard();
+  const migrationGeneration = createGenerationGuard();
   const storageMigrationGeneration = createGenerationGuard();
   let breachController;
-  
+
   // --- ЛОГИКА ТЕМЫ ---
-  let isDarkMode = true;
+
 
   onMount(() => {
     refreshVaultStatus();
@@ -92,83 +112,48 @@
     clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => {
       toastMessage = 'Не удалось получить доступ к буферу обмена';
     });
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'light') {
-      isDarkMode = false;
-      document.body.classList.add('light-theme');
-    }
+    themeController = createThemeController({ storage: localStorage, media: window.matchMedia('(prefers-color-scheme: dark)'), root: document.documentElement });
+    theme = themeController.preference;
+    return () => themeController.destroy();
   });
 
-  function toggleTheme() {
-    isDarkMode = !isDarkMode;
-    if (isDarkMode) {
-      document.body.classList.remove('light-theme');
-      localStorage.setItem('theme', 'dark');
-    } else {
-      document.body.classList.add('light-theme');
-      localStorage.setItem('theme', 'light');
-    }
-  }
+  function setTheme(value) { theme = themeController.set(value); }
+  function navigate(view) { activeView = validView(view); }
+  function showRisk(risk) { riskFilter = risk; activeFilter = 'Все'; searchQuery = ''; navigate('passwords'); }
 
   // Кастомные диалоговые окна
   let dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
 
   function showAlert(title, message) { dialog = { show: true, type: 'alert', title, message, onConfirm: null, onCancel: null }; }
   function showConfirm(title, message, onConfirmCallback, onCancelCallback = null) { dialog = { show: true, type: 'confirm', title, message, onConfirm: onConfirmCallback, onCancel: onCancelCallback }; }
-  function closeDialog() { const cancel = dialog.onCancel; dialog.show = false; if (cancel) cancel(); }
-  function confirmDialog() { const confirm = dialog.onConfirm; dialog.show = false; if (confirm) confirm(); }
-
-  const categories = ['Общие', 'Работа', 'Соцсети', 'Игры', 'Финансы'];
-  const categoryColors = { 'Общие': '#8b949e', 'Работа': '#58a6ff', 'Соцсети': '#3fb950', 'Игры': '#e3b341', 'Финансы': '#f85149' };
-
-  let genLength = 16;
-  let genNumbers = true;
-  let genSymbols = true;
+  function closeDialog() { const cancel = dialog.onCancel; dialog = { show:false }; if (cancel) cancel(); }
+  function confirmDialog() { const confirm = dialog.onConfirm; dialog = { show:false }; if (confirm) confirm(); }
 
   let toastMessage = '';
   let searchQuery = '';
   let activeFilter = 'Все';
+  $: audit = auditPasswords(accounts);
+  $: weakCount = audit.weak;
+  $: reusedCount = audit.reused;
+  $: filteredAccounts = filterAccounts(accounts, searchQuery, activeFilter, riskFilter);
 
-  const SIX_MONTHS_SEC = 180 * 24 * 60 * 60;
-  function isPasswordOld(updatedAt) {
-    if (!updatedAt || updatedAt === 0) return false; 
-    const now = Math.floor(Date.now() / 1000);
-    return (now - updatedAt) > SIX_MONTHS_SEC;
-  }
-
-  $: oldPassCount = accounts.filter(acc => isPasswordOld(acc.updatedAt)).length;
-  $: filteredAccounts = accounts.filter(acc => {
-    const [title, category] = acc.title.split('|||');
-    const actualCategory = category || 'Общие';
-    const matchesSearch = title.toLowerCase().includes(searchQuery.toLowerCase()) || acc.login.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesFilter = activeFilter === 'Все' || actualCategory === activeFilter;
-    return matchesSearch && matchesFilter;
-  });
-  $: weakCount = accounts.filter(acc => acc.password.length < 8 || !/[0-9]/.test(acc.password) || !/[^a-zA-Z0-9]/.test(acc.password)).length;
-  $: reusedCount = (() => {
-    let counts = {};
-    accounts.forEach(a => counts[a.password] = (counts[a.password] || 0) + 1);
-    return accounts.filter(a => counts[a.password] > 1).length;
-  })();
-
-  let isCheckingBreaches = false;
-  let breachChecked = false;
   let breachedCount = 0;
 
   function cancelBreachCheck() {
     breachGeneration.invalidate();
     breachController?.abort();
     breachController = null;
-    isCheckingBreaches = false;
   }
 
   async function checkBreaches() {
+    if (!isLoggedIn) return;
     cancelBreachCheck();
     const checkToken = breachGeneration.capture();
     const sessionToken = sessionGeneration.capture();
     const controller = new AbortController();
     breachController = controller;
-    isCheckingBreaches = true; breachedCount = 0;
+    breachedCount = 0; breachState = 'checking';
+    accounts = accounts.map(account => ({ ...account, isBreached: undefined }));
     try {
       const result = await checkHIBPPasswords(accounts, {
         signal: controller.signal,
@@ -182,19 +167,19 @@
         return account;
       });
       breachedCount = result.results.filter(item => item.breached).length;
-      breachChecked = !result.failed;
+      breachState = result.failed ? (result.results.length ? 'partial' : 'error') : 'complete';
       toastMessage = result.failed ? 'Сетевая проверка утечек не завершена. SHA-1 префиксы отправляются в HIBP; открытые пароли не отправляются.' : 'Проверка выполнена через сеть HIBP (отправляется только SHA-1 префикс)';
       setTimeout(() => toastMessage = '', 4500);
     } catch (error) {
       if (error?.name !== 'AbortError' && breachGeneration.isCurrent(checkToken) && sessionGeneration.isCurrent(sessionToken) && isLoggedIn) {
         console.error(error);
+        breachState = 'error';
         toastMessage = 'Не удалось проверить утечки через сеть HIBP';
         setTimeout(() => toastMessage = '', 4500);
       }
     } finally {
       if (breachGeneration.isCurrent(checkToken)) {
-        isCheckingBreaches = false;
-        breachController = null;
+            breachController = null;
       }
     }
   }
@@ -208,24 +193,25 @@
   function clearSensitiveState(reason = '') {
     sessionGeneration.invalidate();
     cancelBreachCheck();
+    totpEnabled = false; editorOpen = false; editorBusy = false; authBusy = false; breachState = 'idle'; activeView = 'passwords'; riskFilter = 'all';
     isLoggedIn = false; accounts = []; masterPassword = ''; newPass = ''; twoFACode = '';
     setupCode = ''; totpSecret = ''; totpQRCode = ''; show2FASetupModal = false;
-    show2FAInput = false; visiblePasswordIDs = new Set(); showFormPassword = false;
+    show2FAInput = false; visiblePasswordIDs = new Set();
     showAbout = false; dialog = { show: false, type: 'alert', title: '', message: '', onConfirm: null, onCancel: null };
-    showMigrationModal = false; migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
+    closeMigrationModal(); migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
     recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
-    cancelEdit(); searchQuery = ''; breachChecked = false; breachedCount = 0; activeFilter = 'Все';
+    cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
 
-  function setIdlePreference(event) {
-    idleMinutes = Number(event.currentTarget.value); localStorage.setItem('idleLockMinutes', String(idleMinutes));
+  function setIdlePreference(value) {
+    idleMinutes = validChoice(value, IDLE_MINUTES, 1); localStorage.setItem('idleLockMinutes', String(idleMinutes));
     SetIdleTimeout(idleMinutes).catch(() => { toastMessage = 'Не удалось применить тайм-аут блокировки'; });
   }
-  function setClipboardPreference(event) {
-    clipboardSeconds = Number(event.currentTarget.value); localStorage.setItem('clipboardClearSeconds', String(clipboardSeconds));
+  function setClipboardPreference(value) {
+    clipboardSeconds = validChoice(value, CLIPBOARD_SECONDS, 15); localStorage.setItem('clipboardClearSeconds', String(clipboardSeconds));
     clipboardController?.cancel();
     clipboardController = createClipboardController(navigator.clipboard, clipboardSeconds, () => { toastMessage = 'Не удалось получить доступ к буферу обмена'; });
   }
@@ -244,25 +230,16 @@
     };
     document.addEventListener('visibilitychange', checkOnReturn);
     window.addEventListener('focus', checkOnReturn);
-    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); closeStorageMigrationModal(); cancelBreachCheck(); clipboardController?.cancel(); };
+    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); closeStorageMigrationModal(); cancelBreachCheck(); clipboardController?.cancel(); close2FASetup(); closeEditor(); };
   });
 
-  let strengthColor = 'transparent';
-  $: {
-    if (!newPass) strengthColor = 'transparent';
-    else if (newPass.length < 8) strengthColor = '#f85149'; 
-    else if (newPass.length < 12 || !/[0-9]/.test(newPass) || !/[^a-zA-Z0-9]/.test(newPass)) strengthColor = '#e3b341'; 
-    else strengthColor = '#3fb950'; 
-  }
-
-  function generatePassword() {
-    const lower = "abcdefghijklmnopqrstuvwxyz"; const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const numbers = "0123456789"; const symbols = "!@#$%^&*()_+~`|}{[]:;?><,./-=";
-    let chars = lower + upper;
-    if (genNumbers) chars += numbers; if (genSymbols) chars += symbols;
-    let pass = ""; const array = new Uint32Array(genLength); window.crypto.getRandomValues(array);
-    for (let i = 0; i < genLength; i++) { pass += chars[array[i] % chars.length]; }
-    newPass = pass;
+  function generatePassword(options) {
+    const { length = 16, numbers = true, symbols = true } = options || {};
+    let chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    if (numbers) chars += '0123456789';
+    if (symbols) chars += '!@#$%^&*()_+-=?';
+    const bytes = new Uint32Array(length); window.crypto.getRandomValues(bytes);
+    newPass = Array.from(bytes, value => chars[value % chars.length]).join('');
   }
 
   async function copyData(text) {
@@ -284,68 +261,63 @@
       errorMessage = 'Мастер-пароли не совпадают.';
       return;
     }
+    const generation = sessionGeneration.capture();
     setupBusy = true;
     const password = setupMasterPassword;
     setupMasterPassword = '';
     setupConfirmPassword = '';
     try {
       await CreateV2Vault(password);
+      if (!sessionGeneration.isCurrent(generation)) return;
       errorMessage = '';
       await refreshVaultStatus();
       // Unlock through the ordinary v2 login flow; no v1 writes.
+      if (!sessionGeneration.isCurrent(generation)) return;
       if (vaultStatus.state !== 'v2-active') throw new Error('v2 initialization status could not be confirmed');
       const requires2FA = await LoginV2(password);
+      if (!sessionGeneration.isCurrent(generation)) return;
+      totpEnabled = requires2FA;
       if (requires2FA) show2FAInput = true;
-      else { sessionGeneration.advance(); isLoggedIn = true; lockReason = ''; loadAccounts(); }
+      else { sessionGeneration.advance(); setupBusy = false; isLoggedIn = true; lockReason = ''; loadAccounts(); }
     } catch (err) {
-      errorMessage = friendlyBackendError(err);
-      await refreshVaultStatus();
+      if (sessionGeneration.isCurrent(generation)) { errorMessage = friendlyBackendError(err); await refreshVaultStatus(); }
     } finally {
-      setupBusy = false;
+      if (sessionGeneration.isCurrent(generation)) setupBusy = false;
     }
   }
 
   async function handleLogin() {
+    if (authBusy) return;
     loginFormat = loginModeForVaultStatus(vaultStatus);
-    if (loginFormat === 'blocked') {
-      await refreshVaultStatus();
-      errorMessage = friendlyBackendError('ambiguous selector state');
-      return;
-    }
+    if (!['v1', 'v2'].includes(loginFormat)) return;
+    const generation = sessionGeneration.capture();
+    const password = masterPassword;
+    masterPassword = ''; authBusy = true;
     try {
-      const requires2FA = loginFormat === 'v2' ? await LoginV2(masterPassword) : await Login(masterPassword);
-      if (requires2FA) {
-        masterPassword = '';
-        show2FAInput = true;
-        errorMessage = '';
-      } else {
-        sessionGeneration.advance();
-        isLoggedIn = true;
-        errorMessage = '';
-        lockReason = '';
-        masterPassword = '';
-        loadAccounts();      
-      }
+      const requires2FA = loginFormat === 'v2' ? await LoginV2(password) : await Login(password);
+      if (!sessionGeneration.isCurrent(generation)) return;
+      totpEnabled = requires2FA;
+      errorMessage = '';
+      if (requires2FA) show2FAInput = true;
+      else { sessionGeneration.advance(); isLoggedIn = true; lockReason = ''; authBusy = false; loadAccounts(); }
     } catch (err) {
-      if (loginFormat === 'v2') {
-        masterPassword = '';
-        errorMessage = friendlyBackendError(err);
-        await refreshVaultStatus();
-        return;
-      }
+      if (!sessionGeneration.isCurrent(generation)) return;
+      if (loginFormat === 'v2') { errorMessage = friendlyBackendError(err); await refreshVaultStatus(); return; }
       try {
-        const recoveryToken = await PrepareVaultRecovery(masterPassword);
-        showConfirm("Восстановить резервную копию?", "Основной файл повреждён или отсутствует. Резервная копия проверена этим мастер-паролем. Текущий повреждённый файл будет сохранён рядом для диагностики, затем данные будут восстановлены из копии.", async () => {
+        const recoveryToken = await PrepareVaultRecovery(password);
+        if (!sessionGeneration.isCurrent(generation)) { CancelVaultRecovery(recoveryToken).catch(() => {}); return; }
+        showConfirm('Восстановить резервную копию?', 'Резервная копия проверена этим мастер-паролем. Повреждённый основной файл будет сохранён для диагностики. Настройки TOTP также восстановятся из копии.', async () => {
+          if (!sessionGeneration.isCurrent(generation)) return;
           try {
             const requires2FA = await ConfirmVaultRecovery(recoveryToken);
-            errorMessage = '';
-            if (requires2FA) { show2FAInput = true; }
-            else { sessionGeneration.advance(); isLoggedIn = true; masterPassword = ''; loadAccounts(); }
-          } catch (recoveryErr) { errorMessage = friendlyBackendError(recoveryErr); }
-        }, () => { CancelVaultRecovery(recoveryToken); masterPassword = ''; });
-        masterPassword = '';
-      } catch { errorMessage = friendlyBackendError(err); masterPassword = ''; }
-    }
+            if (!sessionGeneration.isCurrent(generation)) return;
+            totpEnabled = requires2FA; errorMessage = '';
+            if (requires2FA) show2FAInput = true;
+            else { sessionGeneration.advance(); isLoggedIn = true; loadAccounts(); }
+          } catch (error) { if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(error); }
+        }, () => CancelVaultRecovery(recoveryToken).catch(() => {}));
+      } catch { if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(err); }
+    } finally { if (sessionGeneration.isCurrent(generation)) authBusy = false; }
   }
 
   async function handleV2Recovery() {
@@ -369,7 +341,8 @@
             const requires2FA = await ConfirmV2VaultRecovery(token);
             if (!sessionGeneration.isCurrent(generation)) return;
             errorMessage = '';
-            if (requires2FA) {
+            totpEnabled = requires2FA;
+      if (requires2FA) {
               show2FAInput = true;
             } else {
               sessionGeneration.advance();
@@ -396,17 +369,17 @@
   }
 
   async function handleVerify2FA() {
+    if (authBusy) return;
+    const generation = sessionGeneration.capture();
+    const code = twoFACode; twoFACode = ''; authBusy = true;
     try {
-      await Verify2FA(twoFACode);
-      sessionGeneration.advance();
-      isLoggedIn = true;
-      show2FAInput = false;
-      twoFACode = '';
-      masterPassword = '';
-      errorMessage = '';
-      lockReason = '';
+      await Verify2FA(code);
+      if (!sessionGeneration.isCurrent(generation)) return;
+      sessionGeneration.advance(); isLoggedIn = true; totpEnabled = true;
+      show2FAInput = false; masterPassword = ''; errorMessage = ''; lockReason = ''; authBusy = false;
       loadAccounts();
-    } catch (err) { errorMessage = friendlyBackendError(err); twoFACode = ''; masterPassword = ''; }
+    } catch (err) { if (sessionGeneration.isCurrent(generation)) { errorMessage = friendlyBackendError(err); masterPassword = ''; } }
+    finally { if (sessionGeneration.isCurrent(generation)) authBusy = false; }
   }
 
   async function handleLogout(reason = '') {
@@ -416,8 +389,10 @@
   }
 
   async function handleReset() {
+    const generation = sessionGeneration.capture();
     try {
       const resetToken = await BeginVaultReset();
+      if (!sessionGeneration.isCurrent(generation)) { CancelVaultReset(resetToken).catch(() => {}); return; }
       showConfirm("Сброс хранилища", "ВНИМАНИЕ! Это действие навсегда удалит все зашифрованные пароли и резервную копию.\nВы уверены?", async () => {
         try {
           await ResetVault(resetToken);
@@ -433,7 +408,8 @@
     try {
       await resolveForGeneration(GetAccounts(), sessionGeneration, token, result => {
         if (!isLoggedIn) return;
-        accounts = result || []; breachChecked = false; breachedCount = 0;
+        cancelBreachCheck(); breachState = 'idle';
+        accounts = result || []; breachedCount = 0;
       });
     } catch (err) {
       if (sessionGeneration.isCurrent(token) && isLoggedIn) await reportBackendFailure(err);
@@ -454,23 +430,31 @@
   }
 
   async function handleSave() {
+    if (!isLoggedIn || editorBusy) return;
+    const generation = sessionGeneration.capture();
     if (!newTitle || !newLogin || !newPass) { showAlert("Внимание", "Заполните все поля перед сохранением."); return; }
+    editorBusy = true;
     const combinedTitle = `${newTitle}|||${selectedCategory}`;
     try {
-      if (editingId) { await UpdateAccount(editingId, combinedTitle, newLogin, newPass); editingId = null; } 
+      if (editingId) { await UpdateAccount(editingId, combinedTitle, newLogin, newPass); }
       else { await AddAccount(combinedTitle, newLogin, newPass); }
-      newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; loadAccounts();
-    } catch (err) { await reportBackendFailure(err); }
+      if (!sessionGeneration.isCurrent(generation) || !isLoggedIn) return;
+      editorOpen = false; cancelEdit(); loadAccounts(); await refreshVaultStatus();
+    } catch (err) { if (sessionGeneration.isCurrent(generation)) await reportBackendFailure(err); }
+    finally { if (sessionGeneration.isCurrent(generation)) editorBusy = false; }
   }
 
   function startEdit(acc) {
     editingId = acc.id; const [title, category] = acc.title.split('|||');
     newTitle = title; newLogin = acc.login; newPass = acc.password; selectedCategory = category || 'Общие';
-    showFormPassword = false;
-    window.scrollTo({ top: 0, behavior: 'smooth' }); 
+
+    editorOpen = true;
   }
 
-  function cancelEdit() { editingId = null; newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; showFormPassword = false; }
+  function addRecord() { cancelEdit(); editorOpen = true; }
+  function closeEditor() { editorOpen = false; cancelEdit(); }
+
+  function cancelEdit() { editingId = null; newTitle = ''; newLogin = ''; newPass = ''; selectedCategory = 'Общие'; }
 
   function togglePassword(id) {
     visiblePasswordIDs = toggleSecretVisibility(visiblePasswordIDs, id);
@@ -479,29 +463,36 @@
   function close2FASetup() { show2FASetupModal = false; totpSecret = ''; totpQRCode = ''; setupCode = ''; }
 
   async function handleDelete(id) {
+    const generation = sessionGeneration.capture();
     showConfirm("Удаление", "Удалить эту запись безвозвратно?", async () => {
-      try { await DeleteAccount(id); if(editingId === id) cancelEdit(); loadAccounts(); } catch (err) { await reportBackendFailure(err); }
+      if (!sessionGeneration.isCurrent(generation) || !isLoggedIn) return;
+      try { await DeleteAccount(id); if (!sessionGeneration.isCurrent(generation) || !isLoggedIn) return; if(editingId === id) cancelEdit(); loadAccounts(); } catch (err) { await reportBackendFailure(err); }
     });
   }
 
   // --- ФУНКЦИИ НАСТРОЙКИ 2FA ---
   async function open2FASetup() {
+    const generation = sessionGeneration.capture();
     try {
       const setupData = await Generate2FA();
+      if (!sessionGeneration.isCurrent(generation) || !isLoggedIn) return;
       totpSecret = setupData.secret;
       totpQRCode = setupData.qrCode;
       show2FASetupModal = true;
-    } catch (err) { showAlert("Ошибка", friendlyBackendError(err)); }
+    } catch (err) { if (sessionGeneration.isCurrent(generation) && isLoggedIn) showAlert('Ошибка', friendlyBackendError(err)); }
   }
 
   async function handleConfirm2FA() {
+    const generation = sessionGeneration.capture();
     try {
       await ConfirmAndEnable2FA(totpSecret, setupCode);
+      if (!sessionGeneration.isCurrent(generation) || !isLoggedIn) return;
+      totpEnabled = true;
       showAlert("Успешно", "Двухфакторная аутентификация успешно включена!");
       show2FASetupModal = false;
       close2FASetup();
-      loadAccounts(); 
-    } catch (err) { showAlert("Ошибка", friendlyBackendError(err)); }
+      loadAccounts();
+    } catch (err) { if (sessionGeneration.isCurrent(generation) && isLoggedIn) showAlert('Ошибка', friendlyBackendError(err)); }
   }
 
   async function refreshVaultStatus() {
@@ -608,6 +599,7 @@
   }
 
   function openMigrationModal() {
+    closeMigrationModal();
     migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationError = '';
     showMigrationModal = true;
@@ -615,6 +607,7 @@
 
   async function prepareV2Migration() {
     if (migrationBusy) return;
+    const modalToken = migrationGeneration.capture();
     const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     const password = migrationPassword;
@@ -622,19 +615,20 @@
     migrationPassword = ''; migrationTotp = '';
     try {
       const token = await PrepareV2Migration(password, code);
-      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken) || !isLoggedIn) return;
       activationToken = token;
       migrationStage = 'activate';
       await refreshVaultStatus();
     } catch (error) {
-      if (sessionGeneration.isCurrent(sessionToken) && isLoggedIn) migrationError = friendlyBackendError(error);
+      if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken) && isLoggedIn) migrationError = friendlyBackendError(error);
     } finally {
-      if (sessionGeneration.isCurrent(sessionToken)) migrationBusy = false;
+      if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationBusy = false;
     }
   }
 
   async function confirmV2Migration() {
     if (migrationBusy || !activationToken) return;
+    const modalToken = migrationGeneration.capture();
     const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     const password = activationPassword;
@@ -642,13 +636,13 @@
     activationPassword = ''; activationTotp = '';
     try {
       await ConfirmV2Migration(activationToken, password, code);
-      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken) || !isLoggedIn) return;
       activationToken = '';
       showMigrationModal = false;
       clearSensitiveState('Хранилище обновлено до v2. Войдите повторно.');
       await refreshVaultStatus();
     } catch (error) {
-      if (!sessionGeneration.isCurrent(sessionToken) || !isLoggedIn) return;
+      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken) || !isLoggedIn) return;
       const message = friendlyBackendError(error);
       migrationError = message;
       activationToken = '';
@@ -661,68 +655,55 @@
       } catch (_) {}
       if (sessionGeneration.isCurrent(sessionToken)) await refreshVaultStatus();
     } finally {
-      if (sessionGeneration.isCurrent(sessionToken)) migrationBusy = false;
+      if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationBusy = false;
     }
   }
 
   async function beginCancelV2Preparation() {
     if (migrationBusy) return;
+    const modalToken = migrationGeneration.capture();
+    const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     try {
-      activationToken = await BeginCancelV2Preparation();
+      const token = await BeginCancelV2Preparation();
+      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken)) return;
+      activationToken = token;
       migrationStage = 'cancel';
       showMigrationModal = true;
-    } catch (error) { migrationError = friendlyBackendError(error); }
-    finally { migrationBusy = false; }
+    } catch (error) { if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationError = friendlyBackendError(error); }
+    finally { if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationBusy = false; }
   }
 
   async function confirmCancelV2Preparation() {
     if (migrationBusy || !activationToken) return;
+    const modalToken = migrationGeneration.capture();
+    const sessionToken = sessionGeneration.capture();
     migrationBusy = true; migrationError = '';
     try {
       await ConfirmCancelV2Preparation(activationToken);
+      if (!sessionGeneration.isCurrent(sessionToken) || !migrationGeneration.isCurrent(modalToken)) return;
       activationToken = ''; showMigrationModal = false; migrationStage = 'reauth';
       await refreshVaultStatus();
       toastMessage = 'Подготовка отменена. Исходные файлы сохранены.';
       setTimeout(() => toastMessage = '', 3000);
-    } catch (error) { migrationError = friendlyBackendError(error); await refreshVaultStatus(); }
-    finally { migrationBusy = false; }
+    } catch (error) { if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) { migrationError = friendlyBackendError(error); await refreshVaultStatus(); } }
+    finally { if (sessionGeneration.isCurrent(sessionToken) && migrationGeneration.isCurrent(modalToken)) migrationBusy = false; }
   }
 
   function closeMigrationModal() {
+    migrationGeneration.invalidate(); migrationBusy = false;
     showMigrationModal = false; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationError = '';
   }
 </script>
 
-<svelte:window on:mousemove={handleActivity} on:keydown={handleActivity} on:click={handleActivity} on:touchstart={handleActivity} on:wheel={handleActivity} />
-
-<div class="app-background"></div>
-
-<main class="container" class:with-diagnostics={!!storageNotice}>
-  {#if toastMessage}
-    <div class="toast glass-panel" transition:fly={{ y: -20, duration: 300 }}>{toastMessage}</div>
-  {/if}
-
-  {#if storageNotice}
-    <section class="glass-panel storage-diagnostic" role="status">
-      <p class:warning-text={storageNotice.kind === 'warning'} class:error={storageNotice.kind === 'blocked'}>{storageNotice.message}</p>
-      {#if storageNotice.canOpenFolder}<button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку хранилища</button>{/if}
-    </section>
-  {/if}
-
-  {#if !isLoggedIn}
-    <div class="login-box glass-panel glass-blur" in:fade={{duration: 400}} out:fade={{duration: 200}}>
-      <div class="theme-toggle-login">
-        <button class="btn-theme-small" on:click={toggleTheme} title="Переключить тему">{isDarkMode ? '☀️' : '🌙'}</button>
-      </div>
-
-      <img src={logoImg} alt="PasswordSaver Logo" class="login-logo" />
-      <h2>PasswordSaver</h2>
-      <p class="subtitle">Локальное зашифрованное хранилище</p>
-      
+<svelte:window on:mousemove={handleActivity} on:keydown={handleActivity} on:click={handleActivity} on:touchstart={handleActivity} on:wheel={handleActivity}/>
+{#if toastMessage}<div class="toast" role="status">{toastMessage}</div>{/if}
+{#if !isLoggedIn}
+  <LoginView {theme} on:change={e => setTheme(e.detail)}>
+    <StorageDiagnostics status={storageStatus} on:click={() => openVaultFolder(false)}/>
       {#if lockReason}
-        <p class="lock-warning" transition:slide>🔒 {lockReason}</p>
+        <p class="lock-warning">{lockReason}</p>
       {/if}
 
       {#if storageStatus.state === 'loading'}
@@ -765,9 +746,9 @@
       {#if storageStatus.state === 'ready' && vaultStatus.state === 'uninitialized'}
         <p class="warning-text">Ранее использовали PasswordSaver? Сначала укажите папку старого хранилища, включая рабочую папку ярлыка версии 2.0.0. Она не выбирается автоматически.</p>
         <label class="check-container"><input type="checkbox" bind:checked={confirmNewVault} />Создать отдельное пустое хранилище; перенос сейчас не требуется</label>
-        <div class="input-group" transition:fade>
-          <input type="password" bind:value={setupMasterPassword} placeholder="Новый мастер-пароль (от 12 символов)" autocomplete="new-password" />
-          <input type="password" bind:value={setupConfirmPassword} placeholder="Повторите мастер-пароль" autocomplete="new-password" on:keydown={(e) => e.key === 'Enter' && handleCreateV2()} />
+        <div class="input-group">
+          <input type="password" bind:value={setupMasterPassword} aria-label="Новый мастер-пароль" placeholder="Новый мастер-пароль (от 12 символов)" autocomplete="new-password" />
+          <input type="password" bind:value={setupConfirmPassword} aria-label="Повторите мастер-пароль" placeholder="Повторите мастер-пароль" autocomplete="new-password" on:keydown={(e) => e.key === 'Enter' && handleCreateV2()} />
           <button class="btn-primary" disabled={setupBusy || !confirmNewVault || storageMigrationBusy || showStorageMigrationModal || !setupMasterPassword || !setupConfirmPassword} on:click={handleCreateV2}>{setupBusy ? 'Создание хранилища…' : 'Создать хранилище v2'}</button>
         </div>
       {:else if storageStatus.state === 'ready' && loginModeForVaultStatus(vaultStatus) === 'blocked'}
@@ -776,16 +757,16 @@
           <button class="btn-secondary" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>
         {/if}
       {:else if storageStatus.state === 'ready' && !show2FAInput && loginModeForVaultStatus(vaultStatus) !== 'blocked'}
-        <div class="input-group" transition:fade>
-          <input type="password" bind:value={masterPassword} placeholder="Введите мастер-пароль" autocomplete="current-password" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
-          <button class="btn-primary" disabled={vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
+        <div class="input-group">
+          <input type="password" bind:value={masterPassword} aria-label="Мастер-пароль" placeholder="Введите мастер-пароль" autocomplete="current-password" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
+          <button class="btn-primary" disabled={authBusy || vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
         </div>
       {:else if storageStatus.state === 'ready' && show2FAInput}
-        <div class="input-group" transition:fly={{ y: 20 }}>
+        <div class="input-group">
           <p class="accent-text" style="margin: 0; font-size: 0.9rem;">Включена двухфакторная защита</p>
-          <input type="text" bind:value={twoFACode} placeholder="Введите 6-значный код TOTP" maxlength="6" style="text-align: center; letter-spacing: 4px; font-size: 1.2rem;" on:keydown={(e) => e.key === 'Enter' && handleVerify2FA()}/>
-          <button class="submit-btn" style="height: 42px;" on:click={handleVerify2FA}>Подтвердить код</button>
-          <button class="btn-micro" style="margin-top: 0;" on:click={async () => { await Logout(); clearSensitiveState(); errorMessage = ''; await refreshVaultStatus(); }}>← Назад к паролю</button>
+          <input type="text" bind:value={twoFACode} aria-label="Код TOTP" placeholder="Введите 6-значный код TOTP" maxlength="6" style="text-align: center; letter-spacing: 4px; font-size: 1.2rem;" on:keydown={(e) => e.key === 'Enter' && handleVerify2FA()}/>
+          <button class="submit-btn" style="height: 42px;" disabled={authBusy} on:click={handleVerify2FA}>Подтвердить код</button>
+          <button class="btn-micro" style="margin-top: 0;" on:click={() => handleLogout('')}>Назад к паролю</button>
         </div>
       {/if}
 
@@ -794,9 +775,9 @@
           {recoveryBusy ? 'Проверка резервной копии…' : 'Восстановить из резервной копии v2'}
         </button>
       {/if}
-      
+
       {#if errorMessage}
-        <p class="error" transition:slide>{errorMessage}</p>
+        <p class="error">{errorMessage}</p>
       {/if}
 
       {#if storageStatus.state === 'ready' && vaultStatus.state === 'v1-active'}
@@ -804,189 +785,43 @@
           <button class="btn-outline-danger" on:click={handleReset}>Сбросить хранилище (Удалить всё)</button>
         </div>
       {/if}
-    </div>
-  {:else}
-    <div class="vault-box glass-panel" in:fade={{duration: 400}}>
-      <div class="header">
-        <div class="header-title">
-          <img src={logoImg} alt="Logo" class="header-logo" />
-          <h2>Мои пароли</h2>
-        </div>
-        <div class="header-actions">
-          <button class="btn-theme" on:click={toggleTheme} title="Переключить тему">{isDarkMode ? '☀️' : '🌙'}</button>
-          <button class="btn-about" style="border-color: var(--accent-color); color: var(--accent-color);" on:click={open2FASetup}>🛡️ Настроить 2FA</button>
-          <button class="btn-about" on:click={() => showAbout = true}>ℹ️ О проекте</button>
-          <button class="btn-lock" on:click={() => handleLogout('Хранилище заблокировано вручную')}>🔒 Заблокировать хранилище</button>
-        </div>
+
+  </LoginView>
+{:else}
+  <AppShell active={activeView} on:navigate={e => navigate(e.detail)} on:lock={() => handleLogout('Хранилище заблокировано')}>
+    <StorageDiagnostics status={storageStatus} on:click={() => openVaultFolder(false)}/>
+    {#if activeView === 'passwords'}
+      <div class="password-page">
+        <header class="page-heading"><div><h1>Мои пароли</h1><p>{accounts.length} записей в хранилище «Основное»</p></div><button class="primary-button" on:click={addRecord}><Icon name="plus" size={19}/>Добавить</button></header>
+        <SearchAndFilters {accounts} bind:query={searchQuery} bind:category={activeFilter} bind:risk={riskFilter}/>
+        {#if riskFilter !== 'all'}<div class="risk-summary"><span>Фильтр безопасности: {{ weak:'слабые', reused:'повторяющиеся', old:'старше 180 дней', breached:'найденные в утечках' }[riskFilter]}</span><button class="text-button" on:click={() => riskFilter = 'all'}>Сбросить</button></div>{/if}
+        <PasswordList accounts={filteredAccounts} total={accounts.length} visibleIDs={visiblePasswordIDs} on:copy={e => copyData(e.detail)} on:toggle={e => togglePassword(e.detail)} on:edit={e => startEdit(e.detail)} on:delete={e => handleDelete(e.detail)}/>
+        <StorageStatusBar storage={storageStatus} on:click={() => handleLogout('Хранилище заблокировано')}/>
       </div>
-
-      <section class="settings-panel storage-location-panel">
-        <div>
-          <strong>Хранилище данных</strong>
-          <div class="storage-location-details">
-            <span>Расположение: <code>{storageStatus.path}</code></span>
-            <span>Формат: {storageStatus.format || 'не определён'}</span>
-            <span>Алгоритм: {storageStatus.algorithm || (storageStatus.format?.startsWith('v1') ? 'legacy' : '—')}</span>
-            <span>Резервная копия: {storageStatus.backupPresent ? 'есть' : 'нет'}</span>
-          </div>
-        </div>
-        <button class="btn-secondary" on:click={() => openVaultFolder(false)}>Открыть папку хранилища</button>
-      </section>
-
-      <section class="settings-panel vault-format-panel">
-        <div>
-          <strong>Безопасность хранилища</strong>
-          <div class="subtitle">
-            {vaultStatus.state === 'v2-active' ? 'Активен формат v2.' : vaultStatus.state === 'v1-prepared' ? (vaultStatus.v2ContainerPresent ? (vaultStatus.preparationFresh ? 'Контейнер v2 проверен, ожидает явной активации.' : 'Есть подготовленный контейнер v2; перед активацией он будет проверен заново.') : 'Подготовленный контейнер v2 отсутствует. Отмените подготовку, чтобы восстановить операции v1.') : 'Активен формат v1.'}
-          </div>
-        </div>
+    {:else if activeView === 'vaults'}
+      <StorageView storage={storageStatus} vault={vaultStatus} on:click={() => openVaultFolder(false)}>
         {#if vaultStatus.state === 'v1-active' || vaultStatus.state === 'v1-prepared'}
-          <div class="vault-format-actions">
-            <button class="btn-secondary" disabled={migrationBusy || (vaultStatus.state === 'v1-prepared' && !vaultStatus.v2ContainerPresent)} on:click={openMigrationModal}>
-              {vaultStatus.state === 'v1-prepared' ? 'Проверить и продолжить переход на v2' : 'Обновить хранилище до v2'}
-            </button>
-            {#if vaultStatus.state === 'v1-prepared'}
-              <button class="btn-cancel" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку</button>
-            {/if}
-          </div>
+          <div class="button-row"><button class="primary-button" disabled={migrationBusy || (vaultStatus.state === 'v1-prepared' && !vaultStatus.v2ContainerPresent)} on:click={openMigrationModal}>Подготовить переход на v2</button>{#if vaultStatus.state === 'v1-prepared'}<button class="secondary-button" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>{/if}</div>
         {/if}
-      </section>
+      </StorageView>
+    {:else if activeView === 'security'}
+      <SecurityView {audit} total={accounts.length} breached={breachedCount} {breachState} {totpEnabled} format={storageStatus.format} on:risk={e => showRisk(e.detail)} on:totp={open2FASetup} on:cancel={() => { cancelBreachCheck(); breachState = 'idle'; }} on:check={() => showConfirm('Проверка через интернет', 'HIBP получит первые 5 символов локально вычисленного SHA-1 хеша каждого пароля. Открытые пароли не отправляются. Разрешить сетевую проверку?', checkBreaches)}/>
+    {:else if activeView === 'settings'}
+      <SettingsView {theme} {idleMinutes} {clipboardSeconds} on:theme={e => setTheme(e.detail)} on:idle={e => setIdlePreference(e.detail)} on:clipboard={e => setClipboardPreference(e.detail)} on:about={() => showAbout = true}/>
+    {:else if activeView === 'devices'}
+      <header class="page-heading"><div><h1>Устройства</h1><p>Ваши пароли сейчас доступны на этом устройстве</p></div></header>
+      <section class="panel future-feature"><span class="future-icon"><Icon name="devices" size={45}/></span><span class="edition-badge">PASSWORDSAVER 3.0</span><h2>Ваши устройства. Одно безопасное пространство.</h2><p class="muted">Подключение устройств и телефона по QR-коду появится в PasswordSaver 3.0. В этой версии нет синхронизации, USB-ключей и подключённых мобильных устройств.</p></section>
+    {/if}
+    <svelte:fragment slot="security"><SecurityCenter {totpEnabled} backupPresent={storageStatus.backupPresent} weak={weakCount} reused={reusedCount} on:security={() => navigate('security')} on:vaults={() => navigate('vaults')} on:phone={() => navigate('devices')}/></svelte:fragment>
+  </AppShell>
+{/if}
+{#if editorOpen && isLoggedIn}<PasswordEditor bind:title={newTitle} bind:login={newLogin} bind:password={newPass} bind:category={selectedCategory} editing={!!editingId} busy={editorBusy} on:save={handleSave} on:close={closeEditor} on:generate={e => generatePassword(e.detail)}/>{/if}
+{#if dialog.show}
+  <Modal title={dialog.title} on:close={closeDialog}><p class="dialog-message">{dialog.message}</p><div class="dialog-buttons"><button class="secondary-button" on:click={closeDialog}>{dialog.type === 'confirm' ? 'Отмена' : 'Понятно'}</button>{#if dialog.type === 'confirm'}<button class="primary-button" on:click={confirmDialog}>Подтвердить</button>{/if}</div></Modal>
+{/if}
 
-      {#if accounts.length > 0}
-        <div class="dashboard" transition:slide>
-          <div class="stat-card"><div class="stat-value">{accounts.length}</div><div class="stat-label">Всего</div></div>
-          <div class="stat-card {weakCount > 0 ? 'danger' : 'safe'}"><div class="stat-value">{weakCount}</div><div class="stat-label">Слабых</div></div>
-          <div class="stat-card {reusedCount > 0 ? 'warning' : 'safe'}"><div class="stat-value">{reusedCount}</div><div class="stat-label">Повторов</div></div>
-          <div class="stat-card {oldPassCount > 0 ? 'warning' : 'safe'}"><div class="stat-value">{oldPassCount}</div><div class="stat-label">Старше 180 дн.</div></div>
-          <div class="stat-card {breachChecked ? (breachedCount > 0 ? 'danger' : 'safe') : ''}">
-            <div class="stat-value">
-              {#if isCheckingBreaches}<div class="skeleton-pulse">...</div>{:else if breachChecked}<span in:fade>{breachedCount}</span>{:else}?{/if}
-            </div>
-            <div class="stat-label">Утечки</div>
-            {#if !isCheckingBreaches}<button class="btn-micro" on:click={() => showConfirm('Проверка через интернет', 'HIBP получит только первые 5 символов локально вычисленного SHA-1 хеша пароля. Открытый пароль не отправляется. Выполнить сетевую проверку?', checkBreaches)}>{breachChecked ? 'Обновить' : 'Проверить'}</button>{/if}
-          </div>
-        </div>
-      {/if}
-
-      <div class="generator-panel">
-        <div class="gen-header"><span class="gen-title">🔑 Генератор надежных паролей</span></div>
-        <div class="gen-controls-wrapper">
-          <div class="gen-slider-block">
-            <label class="gen-label">Длина: <span class="accent-text">{genLength}</span></label>
-            <input type="range" class="custom-slider" min="8" max="32" bind:value={genLength} on:input={generatePassword} style="background: linear-gradient(to right, var(--accent-color) {(genLength - 8) / 24 * 100}%, var(--border-main) {(genLength - 8) / 24 * 100}%);" />
-          </div>
-          <div class="gen-options-block">
-            <label class="check-container"><input type="checkbox" class="custom-checkbox" bind:checked={genNumbers} on:change={generatePassword} /> <span>Цифры</span></label>
-            <label class="check-container"><input type="checkbox" class="custom-checkbox" bind:checked={genSymbols} on:change={generatePassword} /> <span>Символы</span></label>
-          </div>
-          <button class="btn-secondary gen-btn" on:click={generatePassword}>Сгенерировать</button>
-        </div>
-      </div>
-
-      <div class="settings-panel">
-        <label>Автоблокировка
-          <select bind:value={idleMinutes} on:change={setIdlePreference}>
-            {#each IDLE_MINUTES as minutes}<option value={minutes}>{minutes} мин</option>{/each}
-          </select>
-        </label>
-        <label>Очистка буфера обмена
-          <select bind:value={clipboardSeconds} on:change={setClipboardPreference}>
-            {#each CLIPBOARD_SECONDS as seconds}<option value={seconds}>{seconds} сек</option>{/each}
-          </select>
-        </label>
-      </div>
-
-      <div class="add-form-container {editingId ? 'editing-mode' : ''}">
-        <div class="grid-row form-grid">
-          <input type="text" bind:value={newTitle} placeholder="Название сервиса (например, GitHub)" />
-          <input type="text" bind:value={newLogin} placeholder="Логин / Email" />
-          {#if showFormPassword}
-            <input type="text" bind:value={newPass} placeholder="Пароль" style="border-bottom: 2px solid {strengthColor}" />
-          {:else}
-            <input type="password" bind:value={newPass} placeholder="Пароль" style="border-bottom: 2px solid {strengthColor}" />
-          {/if}
-          <button class="btn-micro" type="button" on:click={() => showFormPassword = !showFormPassword}>{showFormPassword ? 'Скрыть' : 'Показать пароль'}</button>
-          <select bind:value={selectedCategory} class="category-select">{#each categories as cat}<option value={cat}>{cat}</option>{/each}</select>
-          <div class="form-buttons">
-            <button class="submit-btn" on:click={handleSave}>{editingId ? 'Сохранить' : 'Добавить'}</button>
-            {#if editingId}<button class="btn-icon-cancel" on:click={cancelEdit} title="Отменить редактирование">✖</button>{/if}
-          </div>
-        </div>
-      </div>
-
-      <div class="accounts-list">
-        {#if accounts.length > 0}
-          <div class="search-zone" transition:slide>
-            <div class="search-bar">
-              <span class="search-icon">🔍</span>
-              <input type="text" bind:value={searchQuery} placeholder="Поиск по названию или логину..." />
-            </div>
-            <div class="filter-tags">
-              {#each ['Все', ...categories] as filter}
-                <button class="tag-filter-btn {activeFilter === filter ? 'active' : ''}" style="--tag-color: {categoryColors[filter] || '#58a6ff'}" on:click={() => activeFilter = filter}>{filter}</button>
-              {/each}
-            </div>
-          </div>
-        {/if}
-
-        {#if accounts.length === 0}
-          <div class="empty-state" in:fade><span class="empty-icon">🗄️</span><p class="empty">Ваше хранилище пока пусто.</p></div>
-        {:else if filteredAccounts.length === 0}
-          <div class="empty-state" in:fade><p class="empty">По вашему запросу ничего не найдено.</p></div>
-        {:else}
-          <div class="grid-row list-header">
-            <span>Сервис</span><span>Логин</span><span>Пароль</span><span>Категория</span><span class="align-right">Действия</span>
-          </div>
-          {#each filteredAccounts as acc (acc.id)}
-            <div animate:flip={{duration: 300}} in:fly={{ y: 20, duration: 300 }} out:slide={{ duration: 200 }} class="grid-row account-card {editingId === acc.id ? 'row-editing' : ''}">
-              <span class="acc-title">
-                <span class="favicon" aria-hidden="true">🔐</span>
-                <div class="title-meta">
-                  <span class="main-title" title={acc.title.split('|||')[0]}>{acc.title.split('|||')[0]}</span>
-                  {#if isPasswordOld(acc.updatedAt)}<span class="old-badge" title="Пароль не обновлялся более 180 дней">⌛ Устарел</span>{/if}
-                </div>
-              </span>
-              <span class="acc-login action-text" on:click={() => copyData(acc.login)} title="Скопировать логин">{acc.login} <span class="copy-icon">📋</span></span>
-              <span class="acc-pass {acc.isBreached ? 'breached-text' : ''}">
-                {#if acc.isBreached}⚠️{/if} {isSecretVisible(visiblePasswordIDs, acc.id) ? acc.password : '••••••••'}
-                <button class="btn-micro" on:click={() => togglePassword(acc.id)} aria-label={isSecretVisible(visiblePasswordIDs, acc.id) ? 'Скрыть пароль' : 'Показать пароль'}>{isSecretVisible(visiblePasswordIDs, acc.id) ? 'Скрыть' : 'Показать'}</button>
-                <button class="btn-micro" on:click={() => copyData(acc.password)} title="Скопировать пароль">📋</button>
-              </span>
-              <span class="acc-category">
-                <span class="category-badge" style="background-color: {categoryColors[acc.title.split('|||')[1] || 'Общие']}1A; color: {categoryColors[acc.title.split('|||')[1] || 'Общие']}; border: 1px solid {categoryColors[acc.title.split('|||')[1] || 'Общие']}40;">{acc.title.split('|||')[1] || 'Общие'}</span>
-              </span>
-              <div class="actions-cell">
-                <button class="action-icon-btn edit-icon" on:click={() => startEdit(acc)} title="Редактировать">✏️</button>
-                <button class="action-icon-btn delete-icon" on:click={() => handleDelete(acc.id)} title="Удалить">🗑️</button>
-              </div>
-            </div>
-          {/each}
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  {#if dialog.show}
-    <div class="modal-overlay" transition:fade on:click|self={closeDialog}>
-      <div class="modal-content glass-panel" transition:fly={{y: -20}}>
-        <h3 class="dialog-title">{dialog.title}</h3>
-        <p class="dialog-message">{dialog.message}</p>
-        <div class="dialog-buttons">
-          {#if dialog.type === 'confirm'}
-            <button class="btn-cancel" on:click={closeDialog}>Отмена</button>
-            <button class="btn-danger-solid" on:click={confirmDialog}>Да, уверен</button>
-          {:else}
-            <button class="btn-primary" on:click={closeDialog}>OK</button>
-          {/if}
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  {#if showMigrationModal}
-    <div class="modal-overlay" role="presentation" transition:fade on:click|self={closeMigrationModal}>
-      <div class="modal-content glass-panel migration-modal" transition:fly={{y: 20}}>
-        <button class="close-btn" disabled={migrationBusy} on:click={closeMigrationModal}>✖</button>
+{#if showMigrationModal}
+<Modal title="Миграция формата хранилища" busy={migrationBusy && migrationStage !== 'reauth'} on:close={closeMigrationModal}>
         {#if migrationStage === 'reauth'}
           <h3 class="dialog-title">Подготовка хранилища v2</h3>
           <p class="dialog-message">Будет создан отдельный зашифрованный контейнер. Исходные файлы v1 и резервная копия сохранятся. После проверки контейнер останется неактивным до отдельного подтверждения.</p>
@@ -1025,14 +860,12 @@
             <button class="btn-danger-solid" disabled={migrationBusy || !activationToken} on:click={confirmCancelV2Preparation}>{migrationBusy ? 'Отмена…' : 'Подтвердить отмену'}</button>
           </div>
         {/if}
-      </div>
-    </div>
-  {/if}
 
-  {#if showStorageMigrationModal}
-    <div class="modal-overlay" role="presentation" transition:fade on:click|self={closeStorageMigrationModal}>
-      <div class="modal-content glass-panel migration-modal" transition:fly={{y: 20}}>
-        <button class="close-btn" disabled={storageMigrationBusy} on:click={closeStorageMigrationModal}>✖</button>
+</Modal>
+{/if}
+
+{#if showStorageMigrationModal}
+<Modal title="Перенос в AppData" busy={storageMigrationBusy && storageMigrationStage === 'confirm'} on:close={closeStorageMigrationModal}>
         {#if storageMigrationStage === 'verify'}
           <h3 class="dialog-title">Перенос в AppData</h3>
           <p class="dialog-message">Будут скопированы текущий зашифрованный контейнер, резервные копии и селектор формата. Приложение проверит активное хранилище мастер-паролем и TOTP, если он включён. Если основной файл повреждён, перенос разрешается только после проверки резервной копии; после копирования её восстановление остаётся отдельной подтверждаемой операцией. Исходные файлы останутся без изменений; перенос не удаляет и не объединяет данные.</p>
@@ -1060,296 +893,17 @@
             <button class="submit-btn" disabled={storageMigrationBusy || !storageMigrationToken} on:click={confirmStorageLocationMigration}>{storageMigrationBusy ? 'Копирование…' : 'Подтвердить копирование'}</button>
           </div>
         {/if}
-      </div>
-    </div>
-  {/if}
 
-  {#if show2FASetupModal}
-    <div class="modal-overlay" transition:fade on:click|self={close2FASetup}>
-      <div class="modal-content glass-panel" style="text-align: center; max-width: 400px;" transition:fly={{y: 20}}>
-        <button class="close-btn" on:click={close2FASetup}>✖</button>
-        <h3 class="dialog-title">Настройка 2FA</h3>
-        <p style="font-size: 0.9rem; color: var(--text-muted);">
-          Отсканируйте этот QR-код в приложении Google Authenticator или Яндекс Ключ
-        </p>
-        
-        {#if totpQRCode}
-          <img src={totpQRCode} alt="QR Code 2FA" style="border: 8px solid white; border-radius: 8px; margin: 15px auto; display: block; width: 200px; height: 200px;" />
-        {/if}
-        
-        <p style="font-family: monospace; font-size: 0.85rem; background: var(--input-bg); padding: 8px; border-radius: 4px; border: 1px solid var(--border-main); user-select: all;">
-          Секрет: {totpSecret}
-        </p>
+</Modal>
+{/if}
 
-        <div style="margin-top: 20px;">
-          <input type="text" bind:value={setupCode} placeholder="Введите код из приложения" maxlength="6" style="text-align: center; margin-bottom: 15px; letter-spacing: 2px;" />
-          <div class="dialog-buttons">
-            <button class="btn-cancel" on:click={close2FASetup}>Отмена</button>
-            <button class="submit-btn" style="height: 38px;" on:click={handleConfirm2FA}>Включить защиту</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  {#if showAbout}
-    <div class="modal-overlay" transition:fade on:click|self={() => showAbout = false}>
-      <div class="modal-content glass-panel about-modal" transition:fly={{y: 20}}>
-        <button class="close-btn" on:click={() => showAbout = false}>✖</button>
-        <h3>О проекте</h3>
-        <div class="about-body">
-          <p class="about-love">Разработано студентами МТУСИ для пользователей с любовью ❤️</p>
-          <p class="team-names">Команда: Дрейман Артём, Лосев Илья, Егоров Семен</p>
-          <p class="about-text">Мы создали этот проект, чтобы сделать управление вашими данными простым, безопасным и по-настоящему удобным.</p>
-          <p class="warm-vibe">
-            Мы искренне рады, что наш PasswordSaver помогает вам хранить пароли в порядке.<br>
-            Каждый клик, который вы делаете в этом приложении — это шаг к вашей цифровой безопасности.<br>
-            Спасибо, что доверяете нам! 🚀
-          </p>
-        </div>
-        <button class="btn-primary" on:click={() => showAbout = false}>Понятно</button>
-      </div>
-    </div>
-  {/if}
-</main>
-
-<style>
-  .container.with-diagnostics { flex-direction: column; align-items: center; justify-content: flex-start; }
-  .storage-diagnostic { width: 100%; max-width: 1000px; padding: 16px; margin-bottom: 16px; }
-  /* --- CSS ПЕРЕМЕННЫЕ (СИСТЕМА ТЕМ) --- */
-  :root {
-    --bg-color: #0d1117;
-    --bg-gradient: radial-gradient(circle at 50% 0%, #1f242c 0%, #0d1117 70%);
-    --panel-bg: rgba(22, 27, 34, 0.75);
-    --text-main: #c9d1d9;
-    --text-heading: #ffffff;
-    --text-muted: #8b949e;
-    --accent-color: #58a6ff;
-    --border-main: #30363d;
-    --border-hover: #484f58;
-    --input-bg: #0d1117;
-    --input-focus-bg: #161b22;
-    --btn-bg: #21262d;
-    --btn-hover: #30363d;
-    --card-bg: rgba(33, 38, 45, 0.4);
-    --card-hover: rgba(33, 38, 45, 0.8);
-    --shadow-color: rgba(0, 0, 0, 0.5);
-    --modal-overlay: rgba(0,0,0,0.75);
-    --modal-bg: #161b22;
-  }
-
-  :global(body.light-theme) {
-    --bg-color: #f6f8fa;
-    --bg-gradient: radial-gradient(circle at 50% 0%, #ffffff 0%, #e1e4e8 80%);
-    --panel-bg: rgba(255, 255, 255, 0.9);
-    --text-main: #24292f;
-    --text-heading: #1f2328;
-    --text-muted: #57606a;
-    --accent-color: #0969da;
-    --border-main: #d0d7de;
-    --border-hover: #afb8c1;
-    --input-bg: #ffffff;
-    --input-focus-bg: #f6f8fa;
-    --btn-bg: #f3f4f6;
-    --btn-hover: #e5e7eb;
-    --card-bg: rgba(255, 255, 255, 0.6);
-    --card-hover: rgba(255, 255, 255, 1);
-    --shadow-color: rgba(0, 0, 0, 0.08);
-    --modal-overlay: rgba(31, 35, 40, 0.5);
-    --modal-bg: #ffffff;
-  }
-
-  /* --- БАЗОВЫЕ СТИЛИ --- */
-  :global(body) { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg-color); color: var(--text-main); overflow-y: scroll; transition: background-color 0.3s ease, color 0.3s ease; }
-  :global(*){ box-sizing: border-box; }
-  :global(::-webkit-scrollbar) { width: 8px; height: 8px; }
-  :global(::-webkit-scrollbar-track) { background: var(--bg-color); }
-  :global(::-webkit-scrollbar-thumb) { background: var(--border-main); border-radius: 4px; }
-  :global(::-webkit-scrollbar-thumb:hover) { background: var(--text-muted); }
-
-  .app-background { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: var(--bg-gradient); z-index: -1; transition: background 0.3s ease; }
-  .container { display: flex; justify-content: center; padding: 40px 20px; min-height: 100vh; }
-  
-  .glass-panel { background: var(--panel-bg); border: 1px solid var(--border-main); box-shadow: 0 10px 30px var(--shadow-color); border-radius: 12px; transition: background 0.3s, border-color 0.3s, box-shadow 0.3s; }
-  .glass-blur { backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
-
-  /* --- ЭКРАН ВХОДА --- */
-  .login-box { width: 100%; max-width: 420px; padding: 40px; text-align: center; height: max-content; margin-top: 5vh; position: relative; }
-  .theme-toggle-login { position: absolute; top: 15px; right: 15px; }
-  .btn-theme-small { background: transparent; border: none; color: var(--text-muted); font-size: 1.2rem; cursor: pointer; transition: 0.2s; }
-  .btn-theme-small:hover { transform: scale(1.1); color: var(--text-heading); }
-  .login-logo { width: 140px; height: 140px; object-fit: contain; margin-bottom: 15px; border-radius: 16px; }
-  h2 { margin-top: 0; margin-bottom: 5px; font-size: 1.8rem; font-weight: 600; color: var(--text-heading); letter-spacing: -0.5px; }
-  .subtitle { color: var(--text-muted); margin-bottom: 30px; font-size: 0.95rem; }
-  .input-group { display: flex; flex-direction: column; gap: 15px; }
-  
-  /* --- ШАПКА ХРАНИЛИЩА --- */
-  .vault-box { width: 100%; max-width: 1000px; padding: 30px; height: max-content; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; border-bottom: 1px solid var(--border-main); padding-bottom: 15px; }
-  .header-title { display: flex; align-items: center; gap: 12px; }
-  .header-logo { width: 48px; height: 48px; object-fit: contain; border-radius: 8px; }
-  .header-actions { display: flex; align-items: center; gap: 10px; }
-
-  /* --- СЕТКА --- */
-  .grid-row { display: grid; grid-template-columns: minmax(120px, 1.5fr) minmax(100px, 1.2fr) minmax(100px, 1.2fr) 110px 130px; gap: 15px; align-items: center; }
-  
-  /* --- ФОРМА ДОБАВЛЕНИЯ --- */
-  .add-form-container { background: var(--card-bg); padding: 15px; border-radius: 8px; margin-bottom: 30px; border: 1px solid var(--border-main); transition: all 0.3s ease; }
-  .editing-mode { border-color: #58a6ff; box-shadow: 0 0 15px rgba(88, 166, 255, 0.1); background: rgba(88, 166, 255, 0.05); }
-  
-  .form-buttons { display: flex; gap: 8px; width: 100%; align-items: center; }
-  .submit-btn { flex: 1; height: 38px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.95rem; background: #238636; color: white; cursor: pointer; transition: 0.2s; white-space: nowrap; display: flex; align-items: center; justify-content: center; }
-  .submit-btn:hover { background: #2ea043; }
-  .btn-icon-cancel { width: 38px; height: 38px; background: var(--btn-bg); color: var(--text-muted); border: 1px solid var(--border-main); border-radius: 6px; cursor: pointer; transition: 0.2s; font-weight: bold; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-  .btn-icon-cancel:hover { background: #f85149; color: white; border-color: #f85149; }
-
-  input[type="text"], input[type="password"], .category-select { padding: 10px 15px; background: var(--input-bg); border: 1px solid var(--border-main); color: var(--text-main); border-radius: 6px; width: 100%; font-size: 0.95rem; height: 38px; transition: all 0.2s; }
-  input[type="text"]:focus, input[type="password"]:focus, .category-select:focus { outline: none; border-color: var(--accent-color); box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15); background: var(--input-focus-bg); }
-  .category-select { cursor: pointer; color: var(--text-muted); appearance: none; }
-
-  /* --- ДАШБОРД --- */
-  .dashboard { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 25px; }
-  .stat-card { flex: 1; min-width: 120px; background: var(--card-bg); padding: 15px; border-radius: 8px; text-align: center; border-bottom: 3px solid var(--border-main); border-top: 1px solid var(--border-main); border-left: 1px solid var(--border-main); border-right: 1px solid var(--border-main); display: flex; flex-direction: column; justify-content: center; align-items: center; transition: background 0.3s; }
-  .stat-value { font-size: 1.8rem; font-weight: 700; margin-bottom: 5px; color: var(--text-heading); }
-  .stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }
-  
-  .stat-card.safe { border-bottom-color: #3fb950; } .stat-card.safe .stat-value { color: #3fb950; }
-  .stat-card.warning { border-bottom-color: #e3b341; } .stat-card.warning .stat-value { color: #e3b341; }
-  .stat-card.danger { border-bottom-color: #f85149; } .stat-card.danger .stat-value { color: #f85149; }
-
-  .skeleton-pulse { color: var(--text-muted); font-weight: bold; font-size: 1.4rem; animation: pulse 1.5s infinite alternate; }
-  @keyframes pulse { 0% { opacity: 0.3; transform: scale(0.95); } 100% { opacity: 1; transform: scale(1.05); } }
-
-  .btn-micro { background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--border-main); padding: 4px 12px; font-size: 0.75rem; border-radius: 6px; cursor: pointer; margin-top: 10px; transition: all 0.2s; font-weight: 500; }
-  .btn-micro:hover { background: var(--btn-hover); border-color: var(--text-muted); }
-
-  /* --- ГЕНЕРАТОР ПАРОЛЕЙ --- */
-  .generator-panel { background: var(--card-bg); padding: 15px 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid var(--border-main); box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); transition: background 0.3s; }
-  .gen-header { margin-bottom: 12px; border-bottom: 1px solid var(--border-main); padding-bottom: 8px; }
-  .gen-title { color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; }
-  
-  .gen-controls-wrapper { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 15px; }
-  .gen-slider-block { display: flex; align-items: center; gap: 15px; flex: 1; min-width: 200px; }
-  .gen-label { font-size: 0.95rem; color: var(--text-main); display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-  .accent-text { color: var(--accent-color); font-weight: bold; display: inline-block; width: 22px; text-align: center; }
-  
-  .custom-slider { -webkit-appearance: none; width: 100%; max-width: 250px; height: 6px; border-radius: 3px; outline: none; transition: opacity .2s; }
-  .custom-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #ffffff; border: 2px solid var(--accent-color); cursor: pointer; box-shadow: 0 0 8px rgba(88, 166, 255, 0.8); }
-  .custom-slider::-webkit-slider-thumb:hover { transform: scale(1.1); }
-  
-  .gen-options-block { display: flex; align-items: center; gap: 20px; border-left: 1px solid var(--border-main); padding-left: 20px; }
-  .check-container { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.95rem; color: var(--text-main); user-select: none; }
-  .custom-checkbox { width: 18px; height: 18px; accent-color: var(--accent-color); cursor: pointer; }
-  
-  .gen-btn { padding: 10px 20px; white-space: nowrap; height: 38px; display: flex; align-items: center; justify-content: center; }
-  .settings-panel { display: flex; gap: 20px; flex-wrap: wrap; margin: 0 0 24px; padding: 12px 15px; background: var(--card-bg); border: 1px solid var(--border-main); border-radius: 8px; }
-  .settings-panel label { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: .9rem; }
-  .settings-panel select { height: 34px; background: var(--input-bg); color: var(--text-main); border: 1px solid var(--border-main); border-radius: 6px; padding: 4px 8px; }
-  .vault-format-panel { align-items: center; justify-content: space-between; }
-  .vault-format-panel .subtitle { margin: 8px 0 0; }
-  .storage-location-panel { align-items: center; justify-content: space-between; }
-  .storage-location-details { display: grid; gap: 5px; margin-top: 10px; color: var(--text-muted); font-size: .9rem; }
-  .storage-location-details code, .storage-route-panel code { overflow-wrap: anywhere; color: var(--text-main); }
-  .storage-route-panel { display: grid; gap: 10px; margin: 15px 0; text-align: left; }
-  .vault-format-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .warning-text { color: #e3b341; font-size: .9rem; line-height: 1.45; }
-
-  /* --- ОБЩИЕ КНОПКИ --- */
-  button { border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.95rem; transition: all 0.2s; }
-  button:active { transform: scale(0.97); }
-  
-  .btn-primary { background: #238636; color: white; padding: 10px 20px; border: 1px solid rgba(255,255,255,0.1); width: 100%; height: 38px; }
-  .btn-primary:hover { background: #2ea043; box-shadow: 0 0 15px rgba(46, 160, 67, 0.4); }
-  
-  .btn-secondary { background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--border-main); padding: 10px 16px; }
-  .btn-secondary:hover { background: var(--btn-hover); border-color: var(--text-muted); }
-  
-  .btn-about, .btn-lock, .btn-theme { background: transparent; color: var(--text-muted); border: 1px solid var(--border-main); padding: 8px 16px; font-size: 0.9rem; border-radius: 20px; cursor: pointer; transition: 0.2s; }
-  .btn-about:hover, .btn-lock:hover, .btn-theme:hover { background: var(--btn-bg); color: var(--text-heading); border-color: var(--text-muted); }
-
-  /* --- ПОИСК И ФИЛЬТРЫ --- */
-  .search-zone { margin-bottom: 25px; background: var(--card-bg); padding: 15px; border-radius: 8px; border: 1px solid var(--border-main); transition: background 0.3s; }
-  .search-bar { margin-bottom: 15px; position: relative; }
-  .search-icon { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); opacity: 0.5; font-size: 1.1rem; color: var(--text-main); }
-  .search-bar input { background: var(--input-bg); border: 1px solid var(--border-main); border-radius: 25px; padding: 12px 20px 12px 45px; font-size: 0.95rem; box-shadow: inset 0 2px 4px rgba(0,0,0,0.05); }
-  
-  .filter-tags { display: flex; gap: 8px; flex-wrap: wrap; }
-  .tag-filter-btn { padding: 6px 14px; font-size: 0.8rem; background: var(--btn-bg); color: var(--text-muted); border-radius: 20px; border: 1px solid var(--border-main); font-weight: 500; }
-  .tag-filter-btn:hover { background: var(--btn-hover); color: var(--text-main); }
-  .tag-filter-btn.active { background: var(--tag-color); color: #fff; border-color: var(--tag-color); font-weight: bold; }
-
-  /* --- СПИСОК АККАУНТОВ --- */
-  .list-header { padding: 0 15px 10px 15px; color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border-main); margin-bottom: 10px; font-weight: 600; }
-  .align-right { text-align: right; }
-  
-  .account-card { padding: 12px 15px; background: var(--card-bg); margin-bottom: 8px; border-radius: 8px; border: 1px solid transparent; transition: all 0.2s ease; }
-  .account-card:hover { background: var(--card-hover); border-color: var(--border-hover); box-shadow: 0 4px 12px var(--shadow-color); }
-  .row-editing { border-color: var(--accent-color); background: rgba(88, 166, 255, 0.05); }
-
-  .acc-title { display: flex; align-items: center; gap: 12px; overflow: hidden; }
-  .title-meta { display: flex; flex-direction: column; gap: 4px; overflow: hidden; justify-content: center; }
-  .main-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-heading); font-size: 1rem; }
-  
-  .badge-group { display: flex; gap: 6px; align-items: center; }
-  .category-badge { font-size: 0.65rem; padding: 2px 8px; border-radius: 12px; font-weight: 700; width: max-content; text-transform: uppercase; letter-spacing: 0.5px; }
-  .old-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 12px; font-weight: 700; background: rgba(227, 179, 65, 0.15); color: #e3b341; border: 1px solid rgba(227, 179, 65, 0.4); white-space: nowrap; cursor: help; }
-  
-  .favicon { width: 22px; height: 22px; border-radius: 4px; background-color: #fff; padding: 2px; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-  
-  .action-text { cursor: pointer; user-select: none; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 6px 0; font-family: 'Courier New', Courier, monospace; font-size: 0.95rem; transition: color 0.2s; }
-  .action-text:hover { color: var(--accent-color); }
-  .copy-icon { font-size: 0.8rem; opacity: 0.3; margin-left: 6px; transition: opacity 0.2s; }
-  .action-text:hover .copy-icon { opacity: 1; }
-  
-  .actions-cell { display: flex; gap: 8px; justify-content: flex-end; }
-  .action-icon-btn { background: var(--btn-bg); width: 36px; height: 36px; border-radius: 6px; font-size: 1rem; border: 1px solid var(--border-main); display: flex; align-items: center; justify-content: center; color: var(--text-main); }
-  .edit-icon:hover { background: rgba(88, 166, 255, 0.1); border-color: var(--accent-color); color: var(--accent-color); }
-  .delete-icon { opacity: 0.8; }
-  .delete-icon:hover { background: rgba(248, 81, 73, 0.1); border-color: #f85149; color: #f85149; opacity: 1; }
-
-  .breached-text { color: #f85149 !important; text-decoration: line-through; opacity: 0.8; }
-  .empty-state { text-align: center; padding: 50px 0; background: var(--card-bg); border-radius: 8px; border: 1px dashed var(--border-main); }
-  .empty-icon { font-size: 3rem; opacity: 0.5; display: block; margin-bottom: 15px; }
-  .empty { color: var(--text-muted); font-size: 1.05rem; margin: 0; }
-  .error { color: #f85149; text-align: center; margin-top: 15px; font-weight: 500; font-size: 0.9rem; }
-  .lock-warning { color: #e3b341; text-align: center; margin-bottom: 20px; font-size: 0.9rem; background: rgba(227, 179, 65, 0.1); padding: 12px; border-radius: 6px; border: 1px solid rgba(227, 179, 65, 0.2); }
-  
-  .reset-zone { margin-top: 30px; padding-top: 25px; border-top: 1px solid var(--border-main); text-align: center; }
-  .btn-outline-danger { background: transparent; border: 1px solid var(--border-hover); color: var(--text-muted); padding: 8px 20px; font-size: 0.85rem; }
-  .btn-outline-danger:hover { border-color: #f85149; color: #f85149; background: rgba(248, 81, 73, 0.1); }
-  
-  .toast { position: fixed; top: 30px; left: 50%; transform: translateX(-50%); background: rgba(46, 160, 67, 0.95); backdrop-filter: blur(10px); color: white; padding: 12px 30px; border-radius: 30px; font-weight: 600; z-index: 1000; box-shadow: 0 10px 30px rgba(46, 160, 67, 0.4); border: 1px solid rgba(255,255,255,0.2); font-size: 1rem; }
-
-  /* --- МОДАЛЬНЫЕ ОКНА --- */
-  .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--modal-overlay); backdrop-filter: blur(5px); display: flex; align-items: center; justify-content: center; z-index: 2000; transition: background 0.3s; }
-  .modal-content { padding: 35px 40px; max-width: 450px; width: 100%; position: relative; border: 1px solid var(--border-main); background: var(--modal-bg); border-radius: 12px; box-shadow: 0 20px 40px var(--shadow-color); transition: background 0.3s, border-color 0.3s; }
-  
-  .about-modal { max-width: 500px; }
-  .about-body { margin: 25px 0; line-height: 1.6; color: var(--text-main); text-align: center; }
-  .about-love { font-size: 1.05rem; margin-bottom: 8px; color: var(--text-heading); font-weight: bold; }
-  .team-names { font-size: 0.95rem; color: var(--text-muted); margin-top: 0; margin-bottom: 25px; }
-  .about-text { margin-bottom: 15px; }
-  .warm-vibe { font-style: italic; color: var(--accent-color); margin-top: 20px; line-height: 1.7; }
-  .close-btn { position: absolute; top: 15px; right: 15px; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.2rem; }
-  .close-btn:hover { color: var(--text-heading); }
-
-  .dialog-title { margin-top: 0; margin-bottom: 15px; font-size: 1.4rem; color: var(--text-heading); text-align: center; }
-  .dialog-message { color: var(--text-main); font-size: 1rem; text-align: center; margin-bottom: 25px; white-space: pre-line; line-height: 1.5; }
-  .dialog-buttons { display: flex; gap: 15px; justify-content: center; }
-  .migration-modal { max-height: 90vh; overflow-y: auto; }
-  .migration-label { display: block; margin: 0 0 14px; color: var(--text-muted); font-size: .9rem; }
-  .migration-label input { display: block; margin-top: 6px; }
-  .migration-buttons { flex-wrap: wrap; }
-  
-  .btn-cancel { background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--border-main); padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; flex: 1; height: 38px; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
-  .btn-cancel:hover { background: var(--btn-hover); border-color: var(--text-muted); }
-  .btn-danger-solid { background: #da3633; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; flex: 1; transition: 0.2s; height: 38px; display: flex; align-items: center; justify-content: center; }
-  .btn-danger-solid:hover { background: #b32d2a; }
-  button:disabled { opacity: .55; cursor: not-allowed; transform: none; }
-  @media (max-width: 700px) {
-    .vault-format-panel { align-items: stretch; }
-    .vault-format-actions { flex-direction: column; }
-    .migration-modal { padding: 32px 22px; }
-    .migration-buttons { flex-direction: column; }
-  }
-</style>
+{#if show2FASetupModal && isLoggedIn}
+  <Modal title="Настройка TOTP" on:close={close2FASetup}>
+    <p class="muted">Отсканируйте QR-код в приложении аутентификации, затем подтвердите код.</p>
+    {#if totpQRCode}<img class="totp-qr" src={totpQRCode} alt="QR-код настройки TOTP"/>{/if}
+    <div class="field"><span>Секрет TOTP</span><code class="secret-code">{totpSecret}</code></div>
+    <label>Код подтверждения<input bind:value={setupCode} inputmode="numeric" maxlength="6" autocomplete="one-time-code"/></label>
+    <div class="dialog-buttons"><button class="secondary-button" on:click={close2FASetup}>Отмена</button><button class="primary-button" on:click={handleConfirm2FA}>Включить TOTP</button></div>
+  </Modal>
+{/if}
+{#if showAbout}<Modal title="О PasswordSaver" on:close={() => showAbout = false}><p>PasswordSaver Standard — локальный менеджер паролей.</p><p class="muted">Разработано студентами МТУСИ: Дрейман Артём, Лосев Илья, Егоров Семен.</p><p class="muted">Интерфейс 2.5. Редакция Standard использует AES-256-GCM и Argon2id. Подключение устройств планируется в 3.0.</p></Modal>{/if}

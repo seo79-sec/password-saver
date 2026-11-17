@@ -30,6 +30,18 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      - name: Test frontend behavior and themes
+        working-directory: frontend
+        run: npm test
+
+      - name: Install browser for UI regression tests
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Test Svelte flows in Chromium
+        working-directory: frontend
+        run: npm run test:ui
+
       - name: Run Go tests
         run: go test ./...
 
