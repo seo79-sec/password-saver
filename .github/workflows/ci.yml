@@ -56,6 +56,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    outputs:
+      preview-zip-sha256: ${{ steps.package-preview.outputs.zip-sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -101,3 +103,118 @@ jobs:
 
       - name: Build Windows desktop application
         run: wails build -platform windows/amd64
+
+      - name: Check Windows preview executable
+        shell: pwsh
+        run: |
+          $exe = Get-Item -LiteralPath 'build/bin/password-saver.exe' -ErrorAction Stop
+          if ($exe.PSIsContainer -or $exe.Length -eq 0) {
+            throw 'Wails did not produce a nonempty password-saver.exe'
+          }
+
+      - name: Package and verify Windows preview ZIP
+        id: package-preview
+        shell: pwsh
+        run: |
+          $artifactName = 'PasswordSaver-2.5-Preview-Windows-x64'
+          $root = [IO.Directory]::CreateTempSubdirectory('passwordsaver-preview-').FullName
+          $zipPath = Join-Path $root "$artifactName.zip"
+          $exe = (Get-Item -LiteralPath 'build/bin/password-saver.exe').FullName
+          $readme = Join-Path $root 'README.txt'
+          $checksums = Join-Path $root 'SHA256SUMS.txt'
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+
+          @"
+          PasswordSaver 2.5 Preview (Windows x64)
+
+          This is a test build for PR #13, not an official release.
+          Use only synthetic data in a dedicated Windows test profile.
+
+          1. Extract the ZIP to a new folder.
+          2. Open the PasswordSaver folder and run password-saver.exe.
+          3. If Microsoft Edge WebView2 Runtime is missing, install the Evergreen
+             Runtime from https://developer.microsoft.com/microsoft-edge/webview2/.
+             Then launch password-saver.exe again.
+
+          To verify the executable in PowerShell, run the following from its folder
+          and compare the hash with SHA256SUMS.txt:
+              Get-FileHash -Algorithm SHA256 .\password-saver.exe
+
+          PR: https://github.com/seo79-sec/password-saver/pull/13
+          Commit: $env:GITHUB_SHA
+          Run: $runUrl (attempt $env:GITHUB_RUN_ATTEMPT)
+          "@ | Set-Content -LiteralPath $readme -Encoding utf8
+          "$hash  password-saver.exe" | Set-Content -LiteralPath $checksums -Encoding ascii
+
+          # Add only the build output and the two generated files.
+          $files = [ordered]@{
+            'PasswordSaver/password-saver.exe' = $exe
+            'PasswordSaver/README.txt' = $readme
+            'PasswordSaver/SHA256SUMS.txt' = $checksums
+          }
+          $zip = [IO.Compression.ZipFile]::Open($zipPath, 'Create')
+          try {
+            foreach ($entry in $files.GetEnumerator()) {
+              [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $entry.Value, $entry.Key) | Out-Null
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $names = @($zip.Entries.FullName)
+            if ($names.Count -ne $files.Count -or (Compare-Object @($files.Keys) $names -CaseSensitive)) {
+              throw 'Preview ZIP does not match the exact file allowlist'
+            }
+          } finally {
+            $zip.Dispose()
+          }
+
+          $extracted = Join-Path $root 'verify'
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $extracted
+          $extractedHash = (Get-FileHash -LiteralPath (Join-Path $extracted 'PasswordSaver/password-saver.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumLine = (Get-Content -LiteralPath (Join-Path $extracted 'PasswordSaver/SHA256SUMS.txt') -Raw).TrimEnd()
+          if ($extractedHash -ne $hash -or $checksumLine -cne "$extractedHash  password-saver.exe") {
+            throw 'Preview ZIP executable checksum mismatch'
+          }
+
+          $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "zip-path=$zipPath" >> $env:GITHUB_OUTPUT
+          "zip-sha256=$zipHash" >> $env:GITHUB_OUTPUT
+          @"
+          ### Windows x64 preview
+
+          After **Upload Windows preview artifact** succeeds, sign in to GitHub and open
+          the [run summary]($runUrl). Under **Artifacts**, download **$artifactName**.
+          Extract the downloaded artifact, then extract **$artifactName.zip**.
+          Open **PasswordSaver/README.txt** and run **PasswordSaver/password-saver.exe**.
+          Use a dedicated Windows test profile with synthetic data.
+
+          Commit: $env:GITHUB_SHA · Run: $env:GITHUB_RUN_ID · Attempt: $env:GITHUB_RUN_ATTEMPT
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Windows preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PasswordSaver-2.5-Preview-Windows-x64
+          path: ${{ steps.package-preview.outputs.zip-path }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  verify-windows-preview:
+    needs: windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the uploaded Windows preview
+        uses: actions/download-artifact@v4
+        with:
+          name: PasswordSaver-2.5-Preview-Windows-x64
+
+      - name: Verify downloaded ZIP matches the validated package
+        env:
+          PREVIEW_ZIP_SHA256: ${{ needs.windows.outputs.preview-zip-sha256 }}
+        run: |
+          printf '%s  %s\n' "$PREVIEW_ZIP_SHA256" 'PasswordSaver-2.5-Preview-Windows-x64.zip' | sha256sum --check --strict
