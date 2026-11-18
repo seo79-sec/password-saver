@@ -13,13 +13,14 @@
   import StorageStatusBar from './components/StorageStatusBar.svelte';
   import StorageDiagnostics from './components/StorageDiagnostics.svelte';
   import SettingsView from './components/SettingsView.svelte';
+  import MasterPasswordDialog from './components/MasterPasswordDialog.svelte';
   import { validView, getThemeController, auditPasswords, filterAccounts } from './ui.js';
   import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
     PrepareStorageLocationMigration, ConfirmStorageLocationMigration, CancelStorageLocationMigration,
     SelectLegacyStorageDirectory, PrepareSelectedStorageLocationMigration, CancelLegacyStorageSelection,
     PrepareV2Migration, ConfirmV2Migration, BeginCancelV2Preparation, ConfirmCancelV2Preparation,
-    Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount,
+    Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount, ChangeMasterPassword,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
@@ -49,6 +50,10 @@
   let errorMessage = '';
   let lockReason = '';
   let recoveryBusy = false;
+  let passwordChangeOpen = false;
+  let passwordChangeBusy = false;
+  let passwordChangeError = '';
+  $: canChangeMasterPassword = isLoggedIn && storageStatus.state === 'ready' && vaultStatus.state === 'v2-active';
 
   let accounts = [];
 
@@ -206,6 +211,7 @@
     closeMigrationModal(); migrationStage = 'reauth'; migrationPassword = ''; migrationTotp = '';
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
+    closeMasterPasswordChange();
     recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
@@ -226,19 +232,89 @@
   onMount(() => {
     lockPoll = setInterval(async () => {
       if (!isLoggedIn) return;
-      try { if (await IsLocked()) clearSensitiveState('Хранилище заблокировано по тайм-ауту'); }
+      const generation = sessionGeneration.capture();
+      try {
+        if (await IsLocked() && sessionGeneration.isCurrent(generation)) showBackendLock();
+      }
       catch (error) { console.error(error); }
     }, 1000);
     const checkOnReturn = async () => {
       if (document.visibilityState !== 'visible' || !isLoggedIn) return;
-      try { if (await CheckInactivity()) { clearSensitiveState('Хранилище заблокировано по тайм-ауту'); return; } }
+      const generation = sessionGeneration.capture();
+      try {
+        const locked = await CheckInactivity();
+        if (!sessionGeneration.isCurrent(generation)) return;
+        if (locked) { showBackendLock(); return; }
+      }
       catch (error) { console.error(error); }
       handleActivity();
     };
     document.addEventListener('visibilitychange', checkOnReturn);
     window.addEventListener('focus', checkOnReturn);
-    return () => { clearInterval(lockPoll); document.removeEventListener('visibilitychange', checkOnReturn); window.removeEventListener('focus', checkOnReturn); sessionGeneration.invalidate(); closeStorageMigrationModal(); cancelBreachCheck(); clipboardController?.cancel(); close2FASetup(); closeEditor(); };
+    return () => {
+      clearInterval(lockPoll);
+      document.removeEventListener('visibilitychange', checkOnReturn);
+      window.removeEventListener('focus', checkOnReturn);
+      sessionGeneration.invalidate();
+      if (passwordChangeBusy) Logout().catch(() => {});
+      closeStorageMigrationModal();
+      closeMasterPasswordChange();
+      cancelBreachCheck();
+      clipboardController?.cancel();
+      close2FASetup();
+      closeEditor();
+    };
   });
+
+  function showBackendLock() {
+    const message = passwordChangeBusy
+      ? 'Сессия закрыта во время смены пароля. Сначала попробуйте войти с новым паролем.'
+      : 'Хранилище заблокировано по тайм-ауту';
+    clearSensitiveState(message);
+  }
+
+  function closeMasterPasswordChange() {
+    passwordChangeOpen = false;
+    passwordChangeBusy = false;
+    passwordChangeError = '';
+  }
+
+  async function submitMasterPasswordChange({ current, next, confirmation, totpCode }) {
+    if (!canChangeMasterPassword || !passwordChangeOpen || passwordChangeBusy) return;
+    const generation = sessionGeneration.capture();
+    const isCurrent = () => componentAlive && sessionGeneration.isCurrent(generation) && passwordChangeOpen;
+    passwordChangeBusy = true;
+    passwordChangeError = '';
+    try {
+      const result = ChangeMasterPassword(current, next, confirmation, totpCode);
+      current = next = confirmation = totpCode = '';
+      await result;
+      if (!isCurrent()) return;
+      errorMessage = '';
+      clearSensitiveState('Мастер-пароль изменён. Войдите с новым паролем');
+      await refreshVaultStatus();
+    } catch (error) {
+      if (!isCurrent()) return;
+      const message = String(error?.message ?? error).split('\n', 1)[0];
+      const unconfirmed = message.startsWith('Результат смены мастер-пароля не подтверждён');
+      let locked = true;
+      try { locked = await IsLocked(); }
+      catch { if (isCurrent()) Logout().catch(() => {}); }
+      if (!isCurrent()) return;
+      if (locked || unconfirmed) {
+        const detail = unconfirmed ? message : 'Сессия закрыта. Результат смены не подтверждён.';
+        errorMessage = '';
+        clearSensitiveState(`${detail} Сначала попробуйте новый пароль. Если он подходит только к резервной копии, подтвердите восстановление из неё. Если оба файла остались в прежнем состоянии, войдите со старым паролем.`);
+        await refreshVaultStatus();
+      } else if (message.startsWith('слишком много неверных кодов 2FA')) {
+        passwordChangeError = 'Слишком много неверных кодов TOTP. Повторите попытку позже.';
+      } else {
+        passwordChangeError = friendlyBackendError(error);
+      }
+    } finally {
+      if (isCurrent()) passwordChangeBusy = false;
+    }
+  }
 
   function generatePassword(options) {
     const { length = 16, numbers = true, symbols = true } = options || {};
@@ -826,13 +902,19 @@
     {:else if activeView === 'security'}
       <SecurityView {audit} total={accounts.length} breached={breachedCount} {breachState} {totpEnabled} format={storageStatus.format} on:risk={e => showRisk(e.detail)} on:totp={open2FASetup} on:cancel={() => { cancelBreachCheck(); breachState = 'idle'; }} on:check={() => showConfirm('Проверка через интернет', 'HIBP получит первые 5 символов локально вычисленного SHA-1 хеша каждого пароля. Открытые пароли не отправляются. Разрешить сетевую проверку?', checkBreaches)}/>
     {:else if activeView === 'settings'}
-      <SettingsView {theme} {idleMinutes} {clipboardSeconds} on:theme={e => setTheme(e.detail)} on:idle={e => setIdlePreference(e.detail)} on:clipboard={e => setClipboardPreference(e.detail)} on:about={() => showAbout = true}/>
+      <SettingsView {theme} {idleMinutes} {clipboardSeconds} {canChangeMasterPassword} vaultState={vaultStatus.state}
+        on:theme={e => setTheme(e.detail)} on:idle={e => setIdlePreference(e.detail)} on:clipboard={e => setClipboardPreference(e.detail)} on:about={() => showAbout = true}
+        on:changePassword={() => { if (canChangeMasterPassword) passwordChangeOpen = true; }}/>
     {:else if activeView === 'devices'}
       <header class="page-heading"><div><h1>Устройства</h1><p>Ваши пароли сейчас доступны на этом устройстве</p></div></header>
       <section class="panel future-feature"><span class="future-icon"><Icon name="devices" size={45}/></span><span class="edition-badge">PASSWORDSAVER 3.0</span><h2>Ваши устройства. Одно безопасное пространство.</h2><p class="muted">Подключение устройств и телефона по QR-коду появится в PasswordSaver 3.0. В этой версии нет синхронизации, USB-ключей и подключённых мобильных устройств.</p></section>
     {/if}
     <svelte:fragment slot="security"><SecurityCenter {totpEnabled} backupPresent={storageStatus.backupPresent} weak={weakCount} reused={reusedCount} on:security={() => navigate('security')} on:vaults={() => navigate('vaults')} on:phone={() => navigate('devices')}/></svelte:fragment>
   </AppShell>
+{/if}
+{#if passwordChangeOpen && isLoggedIn}
+  <MasterPasswordDialog busy={passwordChangeBusy} error={passwordChangeError} {totpEnabled}
+    on:changePassword={event => submitMasterPasswordChange(event.detail)} on:close={closeMasterPasswordChange}/>
 {/if}
 {#if editorOpen && isLoggedIn}<PasswordEditor bind:title={newTitle} bind:login={newLogin} bind:password={newPass} bind:category={selectedCategory} editing={!!editingId} busy={editorBusy} on:save={handleSave} on:close={closeEditor} on:generate={e => generatePassword(e.detail)}/>{/if}
 {#if dialog.show}

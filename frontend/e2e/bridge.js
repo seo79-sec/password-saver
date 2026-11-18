@@ -27,6 +27,11 @@ export async function installBridge(page, options = {}) {
       Login:async()=>{state.locked=false;state.pending=state.totp;return state.totp;},
       Verify2FA:async code=>{if(code !== '123456')throw Error('неверный код 2FA');state.pending=false;},
       Logout:async()=>{state.locked=true;state.pending=false;}, IsLocked:async()=>state.locked || state.pending,
+      ChangeMasterPassword: async () => {
+        if (options.delayPasswordChange) await later('resolvePasswordChange');
+        state.locked = true;
+        state.pending = false;
+      },
       GetAccounts:async()=>{if(state.locked || state.pending)throw Error('locked');if(options.delayAccounts)return later('resolveAccounts');return copy(state.accounts);},
       AddAccount:async(title,login,password)=>{state.accounts.push({id:String(Date.now()),title,login,password,updatedAt:Date.now()/1000});},
       UpdateAccount:async(id,title,login,password)=>{state.accounts=state.accounts.map(a=>a.id===id?{...a,title,login,password}:a);},

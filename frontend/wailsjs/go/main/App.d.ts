@@ -12,6 +12,8 @@ export function CancelVaultRecovery(arg1:string):Promise<void>;
 
 export function CancelVaultReset(arg1:string):Promise<void>;
 
+export function ChangeMasterPassword(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
 export function CheckInactivity():Promise<boolean>;
 
 export function CreateV2Vault(arg1:string):Promise<void>;
