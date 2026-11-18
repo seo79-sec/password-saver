@@ -101,6 +101,12 @@ func saveVaultToPath(path string, cm *crypto.CryptoManager, v *Vault) error {
 // writeFileAtomic writes in the destination directory, syncs the data, and
 // replaces the destination using the platform's atomic replacement operation.
 func writeFileAtomic(path string, data []byte) error {
+	return writeFileAtomicChecked(path, data, nil)
+}
+
+// beforeReplace runs after the temporary file is closed and synced, as close
+// to the rename as possible. It cannot make a filesystem compare-and-swap.
+func writeFileAtomicChecked(path string, data []byte, beforeReplace func() error) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".vault-write-*")
 	if err != nil {
@@ -122,6 +128,11 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if beforeReplace != nil {
+		if err := beforeReplace(); err != nil {
+			return err
+		}
 	}
 	if err := replaceVaultFile(tmpName, path); err != nil {
 		return err

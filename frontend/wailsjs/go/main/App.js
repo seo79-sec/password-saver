@@ -22,6 +22,10 @@ export function CancelVaultReset(arg1) {
   return window['go']['main']['App']['CancelVaultReset'](arg1);
 }
 
+export function ChangeMasterPassword(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ChangeMasterPassword'](arg1, arg2, arg3, arg4);
+}
+
 export function CheckInactivity() {
   return window['go']['main']['App']['CheckInactivity']();
 }
