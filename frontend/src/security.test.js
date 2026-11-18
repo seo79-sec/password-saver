@@ -163,7 +163,8 @@ test('admissible write residue warns without blocking v1 or v2 login and backup 
   const notice = storageDiagnosticNotice({ state: 'ready', temporaryFiles: 2, diagnostic: 'write-residue' });
   assert.equal(notice.kind, 'warning');
   assert.equal(notice.canOpenFolder, true);
-  assert.match(notice.message, /Основное хранилище не изменено/);
+  assert.doesNotMatch(notice.message, /Основное хранилище не изменено/);
+  assert.match(notice.message, /не подтверждает целостность/);
   assert.match(notice.message, /Автоматическая очистка не выполняется/);
   assert.equal(storageLocationMode({ state: 'ready' }), 'ready');
   assert.equal(loginModeForVaultStatus({ state: 'v2-active' }), 'v2');
