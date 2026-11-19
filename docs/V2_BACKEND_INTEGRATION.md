@@ -67,12 +67,15 @@ An empty file, arbitrary bytes, a truncated container, a malformed supported
 container, or a supported container whose AEAD authentication fails can be
 treated as damaged. A recognizable unsupported format/version, algorithm, or
 KDF is refused even if later JSON is truncated; a valid v1-shaped file is also
-refused. A valid current v2 Vault cannot be replaced by an older backup. The
-damaged primary is copied byte-for-byte to a unique `.corrupt-*` archive before
+refused. Recovery is refused if the primary opens with the supplied password.
+If the authenticated backup has TOTP enabled, Go requires its current code
+before creating any archive or changing the primary. A wrong or missing code
+consumes the challenge and counts against the same attempt limit as login.
+The damaged primary is copied byte-for-byte to a unique `.corrupt-*` archive before
 the already-verified backup bytes atomically replace it. The v2 selector,
 backup, and v1 primary/backup are not changed by recovery. There is no fallback
 to v1. A failed or canceled operation clears the pending v2 session and leaves
-the app locked.
+the app locked. After a successful restore the verified session opens.
 
 Recovery restores authorization settings from the backup snapshot. If it
 predates enabling TOTP, the restored vault has TOTP disabled and does not prompt

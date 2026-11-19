@@ -14,6 +14,7 @@
   import StorageDiagnostics from './components/StorageDiagnostics.svelte';
   import SettingsView from './components/SettingsView.svelte';
   import MasterPasswordDialog from './components/MasterPasswordDialog.svelte';
+  import V2RecoveryDialog from './components/V2RecoveryDialog.svelte';
   import { validView, getThemeController, auditPasswords, filterAccounts } from './ui.js';
   import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
@@ -50,6 +51,7 @@
   let errorMessage = '';
   let lockReason = '';
   let recoveryBusy = false;
+  let v2Recovery = null;
   let passwordChangeOpen = false;
   let passwordChangeBusy = false;
   let passwordChangeError = '';
@@ -212,7 +214,7 @@
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
     closeMasterPasswordChange();
-    recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
+    closeV2Recovery(); confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
   }
@@ -256,7 +258,8 @@
       document.removeEventListener('visibilitychange', checkOnReturn);
       window.removeEventListener('focus', checkOnReturn);
       sessionGeneration.invalidate();
-      if (passwordChangeBusy) Logout().catch(() => {});
+      if (passwordChangeBusy || v2Recovery?.confirming) Logout().catch(() => {});
+      closeV2Recovery();
       closeStorageMigrationModal();
       closeMasterPasswordChange();
       cancelBreachCheck();
@@ -370,7 +373,7 @@
   }
 
   async function handleLogin() {
-    if (authBusy) return;
+    if (authBusy || recoveryBusy) return;
     loginFormat = loginModeForVaultStatus(vaultStatus);
     if (!['v1', 'v2'].includes(loginFormat)) return;
     const generation = sessionGeneration.capture();
@@ -404,50 +407,55 @@
   }
 
   async function handleV2Recovery() {
-    if (recoveryBusy) return;
+    if (recoveryBusy || authBusy || show2FAInput) return;
     const generation = sessionGeneration.capture();
     const password = masterPassword;
     masterPassword = '';
+    errorMessage = '';
     recoveryBusy = true;
     try {
-      const token = await PrepareV2VaultRecovery(password);
-      if (!sessionGeneration.isCurrent(generation) || isLoggedIn) {
-        CancelV2VaultRecovery(token);
+      const prepared = await PrepareV2VaultRecovery(password);
+      if (!componentAlive || !sessionGeneration.isCurrent(generation)) {
+        CancelV2VaultRecovery(prepared.token).catch(() => {});
         return;
       }
-      showConfirm(
-        'Восстановить хранилище v2?',
-        'Резервная копия проверена этим мастер-паролем. Текущее основное хранилище будет сохранено рядом для диагностики, затем его заменит копия. Изменения после создания копии могут быть потеряны. Настройки защиты тоже восстановятся из копии: если она создана до включения TOTP, после восстановления TOTP останется выключен. Полный доступ к локальным файлам позволяет подменить или откатить и хранилище, и селектор; приложение не может гарантировать защиту от такого отката. Селектор останется на v2; автоматического перехода на v1 не будет.',
-        async () => {
-          if (!sessionGeneration.isCurrent(generation)) return;
-          try {
-            const requires2FA = await ConfirmV2VaultRecovery(token);
-            if (!sessionGeneration.isCurrent(generation)) return;
-            errorMessage = '';
-            totpEnabled = requires2FA;
-      if (requires2FA) {
-              show2FAInput = true;
-            } else {
-              sessionGeneration.advance();
-              isLoggedIn = true;
-              lockReason = '';
-              loadAccounts();
-            }
-            await refreshVaultStatus();
-          } catch (recoveryErr) {
-            if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(recoveryErr);
-          } finally {
-            if (sessionGeneration.isCurrent(generation)) recoveryBusy = false;
-          }
-        },
-        () => {
-          CancelV2VaultRecovery(token);
-          if (sessionGeneration.isCurrent(generation)) recoveryBusy = false;
-        }
-      );
-    } catch (err) {
-      if (sessionGeneration.isCurrent(generation)) errorMessage = friendlyBackendError(err);
+      v2Recovery = { ...prepared, confirming: false };
+    } catch (error) {
+      if (!sessionGeneration.isCurrent(generation)) return;
+      errorMessage = friendlyBackendError(error);
       recoveryBusy = false;
+    }
+  }
+
+  function closeV2Recovery() {
+    const token = v2Recovery?.token;
+    v2Recovery = null;
+    recoveryBusy = false;
+    if (token) CancelV2VaultRecovery(token).catch(() => {});
+  }
+
+  async function confirmV2Recovery(code) {
+    if (!v2Recovery || v2Recovery.confirming || isLoggedIn) return;
+    const generation = sessionGeneration.capture();
+    const prepared = v2Recovery;
+    v2Recovery = { ...prepared, confirming: true };
+    try {
+      await ConfirmV2VaultRecovery(prepared.token, code);
+      if (!componentAlive || !sessionGeneration.isCurrent(generation)) return;
+      v2Recovery = null;
+      recoveryBusy = false;
+      errorMessage = '';
+      lockReason = '';
+      sessionGeneration.advance();
+      totpEnabled = prepared.requiresTOTP;
+      isLoggedIn = true;
+      loadAccounts();
+      await refreshVaultStatus();
+    } catch (error) {
+      if (!componentAlive || !sessionGeneration.isCurrent(generation)) return;
+      closeV2Recovery();
+      errorMessage = friendlyBackendError(error);
+      await refreshVaultStatus();
     }
   }
 
@@ -854,7 +862,7 @@
       {:else if storageStatus.state === 'ready' && !show2FAInput && loginModeForVaultStatus(vaultStatus) !== 'blocked'}
         <div class="input-group">
           <input type="password" bind:value={masterPassword} aria-label="Мастер-пароль" placeholder="Введите мастер-пароль" autocomplete="current-password" on:keydown={(e) => e.key === 'Enter' && handleLogin()}/>
-          <button class="btn-primary" disabled={authBusy || vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
+          <button class="btn-primary" disabled={authBusy || recoveryBusy || vaultStatus.state === 'loading' || (vaultStatus.state === 'v2-active' && !vaultStatus.v2ContainerPresent)} on:click={handleLogin}>Разблокировать</button>
         </div>
       {:else if storageStatus.state === 'ready' && show2FAInput}
         <div class="input-group">
@@ -915,6 +923,10 @@
 {#if passwordChangeOpen && isLoggedIn}
   <MasterPasswordDialog busy={passwordChangeBusy} error={passwordChangeError} {totpEnabled}
     on:changePassword={event => submitMasterPasswordChange(event.detail)} on:close={closeMasterPasswordChange}/>
+{/if}
+{#if v2Recovery && !isLoggedIn}
+  <V2RecoveryDialog requiresTOTP={v2Recovery.requiresTOTP} busy={v2Recovery.confirming}
+    on:confirm={event => confirmV2Recovery(event.detail)} on:close={closeV2Recovery}/>
 {/if}
 {#if editorOpen && isLoggedIn}<PasswordEditor bind:title={newTitle} bind:login={newLogin} bind:password={newPass} bind:category={selectedCategory} editing={!!editingId} busy={editorBusy} on:save={handleSave} on:close={closeEditor} on:generate={e => generatePassword(e.detail)}/>{/if}
 {#if dialog.show}

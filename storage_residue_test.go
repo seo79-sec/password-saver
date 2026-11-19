@@ -205,7 +205,7 @@ func TestWriteResidueDoesNotReplaceExplicitBackupRecovery(t *testing.T) {
 			if status := app.GetVaultStatus(); status.State != VaultStateV2Active || !status.V2BackupPresent {
 				t.Fatalf("recovery hidden: %+v", status)
 			}
-			token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+			prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,15 +214,14 @@ func TestWriteResidueDoesNotReplaceExplicitBackupRecovery(t *testing.T) {
 			if !missing {
 				assertStorageBytes(t, dataFileV2, corrupt)
 			}
-			needsTOTP, err := app.ConfirmV2VaultRecovery(token)
-			if err != nil || !needsTOTP {
-				t.Fatalf("recovery = %v, %v", needsTOTP, err)
+			if !prepared.RequiresTOTP {
+				t.Fatal("temporary residue hid the second-factor requirement of the backup")
 			}
 			if _, err := app.GetAccounts(); err == nil {
-				t.Fatal("recovery skipped TOTP")
+				t.Fatal("backup password alone unlocked records")
 			}
-			if err := app.Verify2FA(currentCode(t, want.TwoFASecret)); err != nil {
-				t.Fatal(err)
+			if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, want.TwoFASecret)); err != nil {
+				t.Fatalf("recovery with TOTP: %v", err)
 			}
 			assertStorageBytes(t, dataFileV2, backup)
 			assertStorageBytes(t, dataFileV2+".bak", backup)

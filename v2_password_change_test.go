@@ -152,18 +152,18 @@ func TestMasterPasswordChangePreservesPayloadTOTPAndLegacyFiles(t *testing.T) {
 	}
 	reopened.Logout()
 	corruptV2Primary(t)
-	token, err := reopened.PrepareV2VaultRecovery(rotatedTestPassword)
+	prepared, err := reopened.PrepareV2VaultRecovery(rotatedTestPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needsTOTP, err := reopened.ConfirmV2VaultRecovery(token); err != nil || !needsTOTP {
-		t.Fatalf("recover = (%v, %v)", needsTOTP, err)
+	if !prepared.RequiresTOTP {
+		t.Fatal("backup lost TOTP after rotation")
 	}
 	if _, err := reopened.GetAccounts(); err == nil {
-		t.Fatal("recovery bypassed TOTP")
+		t.Fatal("backup preparation bypassed TOTP")
 	}
-	if err := reopened.Verify2FA(currentCode(t, want.TwoFASecret)); err != nil {
-		t.Fatal(err)
+	if err := reopened.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, want.TwoFASecret)); err != nil {
+		t.Fatalf("recover with TOTP: %v", err)
 	}
 	assertPasswordChangeVault(t, engine, dataFileV2, rotatedTestPassword, want)
 }
@@ -321,12 +321,15 @@ func TestMasterPasswordChangeWriteFailuresLeaveRecoverableRevisions(t *testing.T
 				} else {
 					assertPasswordChangeVault(t, engine, dataFileV2+".bak", rotatedTestPassword, want)
 					if !primaryUpdated {
-						token, err := reopened.PrepareV2VaultRecovery(rotatedTestPassword)
+						prepared, err := reopened.PrepareV2VaultRecovery(rotatedTestPassword)
 						if err != nil {
 							t.Fatalf("fresh process could not prepare recovery: %v", err)
 						}
-						if totp, err := reopened.ConfirmV2VaultRecovery(token); err != nil || totp {
-							t.Fatalf("resume from new backup = (%v, %v)", totp, err)
+						if prepared.RequiresTOTP {
+							t.Fatal("unexpected second factor for the synthetic backup")
+						}
+						if err := reopened.ConfirmV2VaultRecovery(prepared.Token, ""); err != nil {
+							t.Fatalf("resume from new backup: %v", err)
 						}
 						assertPasswordChangeVault(t, engine, dataFileV2, rotatedTestPassword, want)
 					}

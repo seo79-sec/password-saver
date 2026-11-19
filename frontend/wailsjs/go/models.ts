@@ -1,4 +1,16 @@
 export namespace main {
+    export class V2RecoveryPreparation {
+        token: string;
+        requiresTOTP: boolean;
+
+        static createFrom(source: any = {}) { return new V2RecoveryPreparation(source); }
+
+        constructor(source: any = {}) {
+            if ('string' === typeof source) source = JSON.parse(source);
+            this.token = source["token"];
+            this.requiresTOTP = source["requiresTOTP"];
+        }
+    }
 
     export class LegacyStorageSelection {
         token: string;

@@ -395,16 +395,15 @@ func TestStorageMigrationCopiesDamagedPrimaryAndAllowsExplicitBackupRecovery(t *
 	assertSnapshotEqual(t, fixture.source, fixture.files)
 	app := NewApp()
 	app.v2Engine = fixture.engine
-	token, err = app.PrepareV2VaultRecovery(fixture.password)
+	prepared, err := app.PrepareV2VaultRecovery(fixture.password)
 	if err != nil {
 		t.Fatalf("backup recovery after storage copy could not be prepared: %v", err)
 	}
-	requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
-	if err != nil || !requiresTOTP {
-		t.Fatalf("backup recovery confirmation = (%v, %v)", requiresTOTP, err)
+	if !prepared.RequiresTOTP {
+		t.Fatal("storage copy lost TOTP")
 	}
-	if err := app.Verify2FA(currentCode(t, fixture.vault.TwoFASecret)); err != nil {
-		t.Fatalf("recovered TOTP verification failed: %v", err)
+	if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, fixture.vault.TwoFASecret)); err != nil {
+		t.Fatalf("backup recovery confirmation with TOTP failed: %v", err)
 	}
 	accounts, err := app.GetAccounts()
 	if err != nil || !reflect.DeepEqual(accounts, fixture.vault.Accounts) {
@@ -447,12 +446,14 @@ func TestStorageMigrationUsesPreTOTPBackupOnlyThroughExplicitRecovery(t *testing
 	}
 	recovered := NewApp()
 	recovered.v2Engine = fixture.engine
-	if token, err := recovered.PrepareV2VaultRecovery(fixture.password); err != nil {
+	if prepared, err := recovered.PrepareV2VaultRecovery(fixture.password); err != nil {
 		t.Fatalf("recovery from pre-TOTP backup could not be prepared: %v", err)
 	} else {
-		requiresTOTP, err := recovered.ConfirmV2VaultRecovery(token)
-		if err != nil || requiresTOTP {
-			t.Fatalf("recovered pre-TOTP state = (%v, %v)", requiresTOTP, err)
+		if prepared.RequiresTOTP {
+			t.Fatal("pre-TOTP backup reported a second factor")
+		}
+		if err := recovered.ConfirmV2VaultRecovery(prepared.Token, ""); err != nil {
+			t.Fatalf("recovered pre-TOTP state: %v", err)
 		}
 	}
 	accounts, err := recovered.GetAccounts()

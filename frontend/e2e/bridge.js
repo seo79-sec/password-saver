@@ -44,8 +44,14 @@ export async function installBridge(page, options = {}) {
       PrepareStorageLocationMigration:async()=>options.delayMigration?later('resolveMigration'):'synthetic-copy-token',
       PrepareSelectedStorageLocationMigration:async()=>options.delayMigration?later('resolveMigration'):'synthetic-copy-token',
       ConfirmStorageLocationMigration:async()=>{state.storage.state='ready';state.storage.legacyPaths=[];},
-      PrepareV2VaultRecovery:async()=> 'synthetic-recovery-token', CancelV2VaultRecovery:async()=>{},
-      ConfirmV2VaultRecovery:async()=>{state.locked=false;state.pending=state.totp;return state.totp;},
+      PrepareV2VaultRecovery: async () => ({ token: 'synthetic-recovery-token', requiresTOTP: state.totp }),
+      CancelV2VaultRecovery: async () => {},
+      ConfirmV2VaultRecovery: async (token, code) => {
+        if (token !== 'synthetic-recovery-token') throw Error('unexpected recovery token');
+        if (state.totp && code !== '123456') throw Error('неверный код 2FA');
+        state.locked = false;
+        state.pending = false;
+      },
       PrepareV2Migration:async()=>{
         const token = options.delayMigration ? await later('resolveMigration') : 'synthetic-activation';
         state.vault={...state.vault,state:'v1-prepared',v2ContainerPresent:true,preparationFresh:true};

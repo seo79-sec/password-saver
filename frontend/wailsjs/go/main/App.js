@@ -114,8 +114,8 @@ export function PrepareV2VaultRecovery(arg1) {
   return window['go']['main']['App']['PrepareV2VaultRecovery'](arg1);
 }
 
-export function ConfirmV2VaultRecovery(arg1) {
-  return window['go']['main']['App']['ConfirmV2VaultRecovery'](arg1);
+export function ConfirmV2VaultRecovery(arg1, arg2) {
+  return window['go']['main']['App']['ConfirmV2VaultRecovery'](arg1, arg2);
 }
 
 export function CancelV2VaultRecovery(arg1) {

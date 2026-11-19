@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/pquerna/otp/totp"
 	cryptov2 "password-saver/crypto/v2"
 )
 
@@ -31,39 +32,48 @@ type v2RecoveryChallenge struct {
 	vault         *Vault
 }
 
+// V2RecoveryPreparation contains the explicit capability and the second-factor
+// requirement of the authenticated backup. It never exposes the TOTP secret.
+type V2RecoveryPreparation struct {
+	Token        string `json:"token"`
+	RequiresTOTP bool   `json:"requiresTOTP"`
+}
+
+var errV2RecoveryInvalidTOTP = errors.New("неверный код 2FA")
+
 // PrepareV2VaultRecovery authenticates a v2 backup while the app is locked.
 // It refuses recovery if the primary still opens with this password. No file
 // is changed until ConfirmV2VaultRecovery consumes the explicit challenge.
-func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
+func (a *App) PrepareV2VaultRecovery(password string) (V2RecoveryPreparation, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	// A session waiting for TOTP is still a live, password-authenticated
 	// session with key material. isLockedLocked alone is insufficient because
 	// it also returns true while the second factor is pending.
 	if a.cm != nil || a.v2Session != nil || a.vault != nil || a.twoFAVerified {
-		return "", errors.New("восстановление доступно только после полного выхода из хранилища")
+		return V2RecoveryPreparation{}, errors.New("восстановление доступно только после полного выхода из хранилища")
 	}
 	if a.pendingRecover.cm != nil || a.pendingV2Recover.session != nil {
-		return "", errors.New("сначала отмените или дождитесь завершения предыдущей операции восстановления")
+		return V2RecoveryPreparation{}, errors.New("сначала отмените или дождитесь завершения предыдущей операции восстановления")
 	}
 	if err := a.checkTOTPAttemptsLocked(); err != nil {
-		return "", err
+		return V2RecoveryPreparation{}, err
 	}
 	engine, err := a.v2EngineLocked()
 	if err != nil {
-		return "", err
+		return V2RecoveryPreparation{}, err
 	}
 
 	directory, err := activeVaultStorageDirectory()
 	if err != nil {
-		return "", err
+		return V2RecoveryPreparation{}, err
 	}
 	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	selector, err := readVaultSelector(paths.selector)
 	if err != nil || validateVaultSelectorRecord(selector) != nil || selector.Mode != selectorActiveV2 {
-		return "", ErrVaultSelectionAmbiguous
+		return V2RecoveryPreparation{}, ErrVaultSelectionAmbiguous
 	}
 
 	v2VaultFileMu.Lock()
@@ -75,45 +85,45 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 	} else if primaryErr != nil {
 		// Do not overwrite files that cannot be safely snapshotted for
 		// diagnostics, including non-regular or over-limit files.
-		return "", primaryErr
+		return V2RecoveryPreparation{}, primaryErr
 	} else {
 		if recoveryHeaderIsUnsupported(primaryBytes) {
-			return "", ErrVaultUnsupportedFormat
+			return V2RecoveryPreparation{}, ErrVaultUnsupportedFormat
 		}
 		if primaryVault, openErr := decryptV2VaultData(primaryBytes, engine, password); openErr == nil {
 			wipeVault(primaryVault)
-			return "", errors.New("основное хранилище открывается; восстановление резервной копии не требуется")
+			return V2RecoveryPreparation{}, errors.New("основное хранилище открывается; восстановление резервной копии не требуется")
 		} else if !errors.Is(openErr, ErrVaultV2Authentication) && !errors.Is(openErr, ErrVaultV2Corrupt) {
-			return "", openErr
+			return V2RecoveryPreparation{}, openErr
 		}
 	}
 
 	backupBytes, err := readV2File(paths.v2 + ".bak")
 	if err != nil {
-		return "", errors.New("резервная копия v2 отсутствует или недоступна")
+		return V2RecoveryPreparation{}, errors.New("резервная копия v2 отсутствует или недоступна")
 	}
 	cryptoSession, plaintext, err := engine.Unlock(password, backupBytes)
 	if err != nil {
-		return "", mapV2RecoveryError(err)
+		return V2RecoveryPreparation{}, mapV2RecoveryError(err)
 	}
 	defer wipeBytes(plaintext)
 	var recovered Vault
 	if err := json.Unmarshal(plaintext, &recovered); err != nil {
 		cryptoSession.Close()
-		return "", ErrVaultV2Corrupt
+		return V2RecoveryPreparation{}, ErrVaultV2Corrupt
 	}
 
 	token, err := newChallengeToken()
 	if err != nil {
 		cryptoSession.Close()
 		wipeVault(&recovered)
-		return "", err
+		return V2RecoveryPreparation{}, err
 	}
 	absPath, err := filepath.Abs(paths.v2)
 	if err != nil {
 		cryptoSession.Close()
 		wipeVault(&recovered)
-		return "", err
+		return V2RecoveryPreparation{}, err
 	}
 	expires := time.Now().Add(recoveryChallengeLifetime)
 	challenge := v2RecoveryChallenge{
@@ -134,7 +144,7 @@ func (a *App) PrepareV2VaultRecovery(password string) (string, error) {
 			a.clearPendingV2RecoveryLocked()
 		}
 	})
-	return token, nil
+	return V2RecoveryPreparation{Token: token, RequiresTOTP: recovered.TwoFAEnabled}, nil
 }
 
 // recoveryHeaderIsUnsupported inspects format metadata independently of the
@@ -221,16 +231,16 @@ func rawJSONUint(value json.RawMessage) (uint64, bool) {
 	return result, err == nil
 }
 
-// ConfirmV2VaultRecovery archives a damaged primary without replacing it in
-// place, then atomically restores exactly the backup bytes authenticated by
-// PrepareV2VaultRecovery. The selector stays v2-active throughout.
-func (a *App) ConfirmV2VaultRecovery(token string) (bool, error) {
+// ConfirmV2VaultRecovery requires the authenticated backup's second factor
+// before creating an archive or replacing the primary. It restores exactly
+// the bytes checked by PrepareV2VaultRecovery and keeps the selector active.
+func (a *App) ConfirmV2VaultRecovery(token, totpCode string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	pending := a.pendingV2Recover
 	if !challengeValid(pending.token, pending.expires, token) || pending.session == nil || pending.vault == nil {
 		a.clearPendingV2RecoveryLocked()
-		return false, errors.New("подтверждение восстановления v2 отсутствует или истекло")
+		return errors.New("подтверждение восстановления v2 отсутствует или истекло")
 	}
 	transferred := false
 	defer func() {
@@ -239,74 +249,81 @@ func (a *App) ConfirmV2VaultRecovery(token string) (bool, error) {
 		}
 	}()
 
+	if pending.vault.TwoFAEnabled {
+		if err := a.checkTOTPAttemptsLocked(); err != nil {
+			return err
+		}
+		if !totp.Validate(totpCode, pending.vault.TwoFASecret) {
+			a.recordTOTPFailureLocked()
+			return errV2RecoveryInvalidTOTP
+		}
+	}
+
 	directory, err := activeVaultStorageDirectory()
 	if err != nil {
-		return false, err
+		return err
 	}
 	paths := vaultPaths(directory)
 	vaultActivationMu.Lock()
 	defer vaultActivationMu.Unlock()
 	selector, err := readVaultSelector(paths.selector)
 	if err != nil || validateVaultSelectorRecord(selector) != nil || selector.Mode != selectorActiveV2 || selector != pending.selector {
-		return false, ErrVaultSelectionAmbiguous
+		return ErrVaultSelectionAmbiguous
 	}
 
 	v2VaultFileMu.Lock()
 	defer v2VaultFileMu.Unlock()
 	currentBackup, err := readV2File(paths.v2 + ".bak")
 	if err != nil || !bytes.Equal(currentBackup, pending.backupBytes) || sha256.Sum256(currentBackup) != pending.backupDigest {
-		return false, errors.New("резервная копия изменилась; повторите проверку восстановления")
+		return errors.New("резервная копия изменилась; повторите проверку восстановления")
 	}
 	if !v2RecoveryFileMatches(paths.v2, pending.primaryExists, pending.primaryBytes, pending.primaryDigest) {
-		return false, errors.New("основное хранилище изменилось; повторите проверку восстановления")
+		return errors.New("основное хранилище изменилось; повторите проверку восстановления")
 	}
 
 	if pending.primaryExists {
 		archivePath, err := unusedCorruptArchivePath(paths.v2)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if err := writeFileAtomicNoReplace(archivePath, pending.primaryBytes); err != nil {
-			return false, fmt.Errorf("повреждённое хранилище не удалось сохранить для диагностики: %w", err)
+			return fmt.Errorf("повреждённое хранилище не удалось сохранить для диагностики: %w", err)
 		}
 		archived, err := readV2File(archivePath)
 		if err != nil || !bytes.Equal(archived, pending.primaryBytes) {
-			return false, errors.New("архив повреждённого хранилища не прошёл проверку")
+			return errors.New("архив повреждённого хранилища не прошёл проверку")
 		}
 	}
 	// Recheck both file snapshots after archiving and immediately before the
 	// atomic replacement to catch edits by processes that do not share our locks.
 	if !v2RecoveryFileMatches(paths.v2, pending.primaryExists, pending.primaryBytes, pending.primaryDigest) {
-		return false, errors.New("основное хранилище изменилось; резервная копия не восстановлена")
+		return errors.New("основное хранилище изменилось; резервная копия не восстановлена")
 	}
 	currentBackup, err = readV2File(paths.v2 + ".bak")
 	if err != nil || !bytes.Equal(currentBackup, pending.backupBytes) || sha256.Sum256(currentBackup) != pending.backupDigest {
-		return false, errors.New("резервная копия изменилась; восстановление отменено")
+		return errors.New("резервная копия изменилась; восстановление отменено")
 	}
 	selector, err = readVaultSelector(paths.selector)
 	if err != nil || validateVaultSelectorRecord(selector) != nil || selector.Mode != selectorActiveV2 || selector != pending.selector {
-		return false, ErrVaultSelectionAmbiguous
+		return ErrVaultSelectionAmbiguous
 	}
 	if err := writeFileAtomic(paths.v2, pending.backupBytes); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
-			return false, fmt.Errorf("состояние восстановления неоднозначно; резервная копия сохранена, повторно проверьте вход: %w", err)
+			return fmt.Errorf("состояние восстановления неоднозначно; резервная копия сохранена, повторно проверьте вход: %w", err)
 		}
-		return false, err
+		return err
 	}
 	a.v2Session = pending.session
 	a.cm = nil
 	a.vault = pending.vault
-	needsTOTP := pending.vault.TwoFAEnabled
-	a.twoFAVerified = !needsTOTP
-	if !needsTOTP {
-		a.totpFailures = 0
-		a.totpBlockedUntil = time.Time{}
-	}
+	a.twoFAVerified = true
+	a.totpFailures = 0
+	a.totpBlockedUntil = time.Time{}
 	a.lastActivity = time.Now()
 	a.armIdleTimerLocked()
 	transferred = true
 	a.clearPendingV2RecoveryLockedWithoutSession()
-	return needsTOTP, nil
+	return nil
 }
 
 // CancelV2VaultRecovery clears an unconsumed recovery challenge.

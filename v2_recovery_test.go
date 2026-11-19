@@ -48,18 +48,20 @@ func TestV2BackupRecoveryIsExplicitAndPreservesTheDamagedPrimary(t *testing.T) {
 	if _, err := app.PrepareV2VaultRecovery("incorrect synthetic password"); !errors.Is(err, ErrVaultV2Authentication) {
 		t.Fatalf("incorrect password error = %v", err)
 	}
-	token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
-	if err != nil || token == "" {
-		t.Fatalf("prepare = (%q, %v)", token, err)
+	prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+	if err != nil || prepared.Token == "" || !prepared.RequiresTOTP {
+		t.Fatalf("prepare = (%+v, %v)", prepared, err)
 	}
 	primaryAfterPrepare, _ := os.ReadFile(dataFileV2)
 	backupAfterPrepare, _ := os.ReadFile(dataFileV2 + ".bak")
 	if !bytes.Equal(primaryAfterPrepare, corrupt) || !bytes.Equal(backupAfterPrepare, backupBefore) {
 		t.Fatal("preparation modified the primary or backup")
 	}
-	requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
-	if err != nil || !requiresTOTP {
-		t.Fatalf("confirm = (%v, %v), want TOTP", requiresTOTP, err)
+	if _, err := app.GetAccounts(); err == nil {
+		t.Fatal("checking the backup password unlocked records before TOTP")
+	}
+	if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, want.TwoFASecret)); err != nil {
+		t.Fatalf("confirm with TOTP: %v", err)
 	}
 	if status := app.GetVaultStatus(); status.State != VaultStateV2Active || !status.V2ContainerPresent {
 		t.Fatalf("recovery changed the active format: %+v", status)
@@ -79,9 +81,6 @@ func TestV2BackupRecoveryIsExplicitAndPreservesTheDamagedPrimary(t *testing.T) {
 	archived, err := os.ReadFile(archives[0])
 	if err != nil || !bytes.Equal(archived, corrupt) {
 		t.Fatalf("damaged primary was not preserved: %v", err)
-	}
-	if err := app.Verify2FA(currentCode(t, want.TwoFASecret)); err != nil {
-		t.Fatal(err)
 	}
 	accounts, err := app.GetAccounts()
 	if err != nil || !reflectVaultEqual(&Vault{Accounts: accounts, TwoFAEnabled: want.TwoFAEnabled, TwoFASecret: want.TwoFASecret}, want) {
@@ -114,11 +113,11 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		if err := os.WriteFile(dataFileV2, invalidVault, 0600); err != nil {
 			t.Fatal(err)
 		}
-		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatalf("prepare rejected invalid decrypted Vault data: %v", err)
 		}
-		if _, err := app.ConfirmV2VaultRecovery(token); err != nil {
+		if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := ReadV2Vault(dataFileV2, engine, migrationTestPassword); err != nil {
@@ -138,11 +137,11 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		if status := restarted.GetVaultStatus(); status.State != VaultStateV2Active || status.V2ContainerPresent || !status.V2BackupPresent {
 			t.Fatalf("status after primary loss = %+v", status)
 		}
-		token, err := restarted.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := restarted.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := restarted.ConfirmV2VaultRecovery(token); err != nil {
+		if err := restarted.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := ReadV2Vault(dataFileV2, engine, migrationTestPassword); err != nil {
@@ -155,7 +154,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		app, _ := activatedV2App(t, syntheticMigrationVault())
 		app.Logout()
 		corruptV2Primary(t)
-		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,7 +164,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		preserved := snapshotV2RecoveryImmutableFiles(t)
 		primaryBefore, _ := os.ReadFile(dataFileV2)
 		backupBefore, _ := os.ReadFile(dataFileV2 + ".bak")
-		if _, err := app.ConfirmV2VaultRecovery(token); err == nil {
+		if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err == nil {
 			t.Fatal("recovery accepted a backup changed after verification")
 		}
 		assertV2RecoveryImmutableFiles(t, preserved)
@@ -180,7 +179,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		app, _ := activatedV2App(t, syntheticMigrationVault())
 		app.Logout()
 		corrupt := corruptV2Primary(t)
-		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +189,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		}
 		preserved := snapshotV2RecoveryImmutableFiles(t)
 		primaryBefore, _ := os.ReadFile(dataFileV2)
-		if _, err := app.ConfirmV2VaultRecovery(token); err == nil {
+		if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err == nil {
 			t.Fatal("recovery accepted a primary changed after verification")
 		}
 		assertV2RecoveryImmutableFiles(t, preserved)
@@ -208,7 +207,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 		app, _ := activatedV2App(t, syntheticMigrationVault())
 		app.Logout()
 		corrupt := corruptV2Primary(t)
-		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +219,7 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 			return oldReplace(source, destination)
 		}
 		defer func() { replaceVaultFile = oldReplace }()
-		if _, err := app.ConfirmV2VaultRecovery(token); err == nil {
+		if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err == nil {
 			t.Fatal("injected replacement failure was ignored")
 		}
 		primaryAfter, err := os.ReadFile(dataFileV2)
@@ -231,6 +230,61 @@ func TestV2BackupRecoverySupportsMissingPrimaryAndRejectsStaleBackup(t *testing.
 			t.Fatal("replacement failure unlocked the app")
 		}
 	})
+}
+
+func TestV2RecoveryRequiresTOTPBeforeWritingAndSharesLockout(t *testing.T) {
+	vault := syntheticMigrationVault()
+	app, _ := activatedV2App(t, vault)
+	defer app.Logout()
+	app.Logout()
+	primary := corruptV2Primary(t)
+	backup := readPasswordChangeTestFile(t, dataFileV2+".bak")
+	immutable := snapshotV2RecoveryImmutableFiles(t)
+	for attempt := 0; attempt < maxTOTPFailures; attempt++ {
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		if err != nil || !prepared.RequiresTOTP {
+			t.Fatalf("prepare attempt %d: %v", attempt, err)
+		}
+		pending := pendingV2RecoverySession(app)
+		code := "invalid"
+		if attempt == 0 {
+			code = ""
+		}
+		if err := app.ConfirmV2VaultRecovery(prepared.Token, code); !errors.Is(err, errV2RecoveryInvalidTOTP) {
+			t.Fatalf("bad TOTP attempt %d: %v", attempt, err)
+		}
+		if pending == nil || !pending.isClosed() || pendingV2RecoverySession(app) != nil || !app.IsLocked() {
+			t.Fatal("failed factor left recovery key material or unlocked the vault")
+		}
+		assertV2RecoveryImmutableFiles(t, immutable)
+		assertFileBytes(t, dataFileV2, primary)
+		assertFileBytes(t, dataFileV2+".bak", backup)
+		archives, err := filepath.Glob(dataFileV2 + ".corrupt-*")
+		if err != nil || len(archives) != 0 {
+			t.Fatalf("invalid TOTP created diagnostic file: %v, %v", archives, err)
+		}
+		app.Logout()
+	}
+	if _, err := app.PrepareV2VaultRecovery(migrationTestPassword); err == nil {
+		t.Fatal("new challenge bypassed the TOTP lockout")
+	}
+	if _, err := app.LoginV2(migrationTestPassword); err == nil || err.Error() != "слишком много неверных кодов 2FA; попробуйте позже" {
+		t.Fatalf("recovery's lockout was not shared with login: %v", err)
+	}
+	app.mu.Lock()
+	app.totpBlockedUntil = time.Now().Add(-time.Second)
+	app.mu.Unlock()
+	prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, vault.TwoFASecret)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GetAccounts(); err != nil {
+		t.Fatalf("valid TOTP did not authorize the restored vault: %v", err)
+	}
+	assertFileBytes(t, dataFileV2, backup)
 }
 
 func TestV2BackupRecoveryRepairsRecognizedDamagedPrimaryBytes(t *testing.T) {
@@ -259,15 +313,17 @@ func TestV2BackupRecoveryRepairsRecognizedDamagedPrimaryBytes(t *testing.T) {
 				t.Fatal(err)
 			}
 			immutable := snapshotV2RecoveryImmutableFiles(t)
-			token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+			prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 			if err != nil {
 				t.Fatalf("prepare from damaged primary: %v", err)
 			}
 			assertV2RecoveryImmutableFiles(t, immutable)
 			assertFileBytes(t, dataFileV2, damaged)
-			requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
-			if err != nil || !requiresTOTP {
-				t.Fatalf("explicit recovery = (%v, %v), want TOTP challenge", requiresTOTP, err)
+			if !prepared.RequiresTOTP {
+				t.Fatal("TOTP requirement missing from authenticated backup")
+			}
+			if err := app.ConfirmV2VaultRecovery(prepared.Token, currentCode(t, syntheticMigrationVault().TwoFASecret)); err != nil {
+				t.Fatalf("explicit recovery with TOTP: %v", err)
 			}
 			assertV2RecoveryImmutableFiles(t, immutable)
 			assertFileBytes(t, dataFileV2+".bak", backupBefore)
@@ -432,13 +488,15 @@ func TestV2RecoveryRestoresTOTPSettingFromOlderBackup(t *testing.T) {
 	}
 	corruptV2Primary(t)
 	immutable := snapshotV2RecoveryImmutableFiles(t)
-	token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+	prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requiresTOTP, err := app.ConfirmV2VaultRecovery(token)
-	if err != nil || requiresTOTP {
-		t.Fatalf("restore pre-TOTP backup = (%v, %v), want no TOTP challenge", requiresTOTP, err)
+	if prepared.RequiresTOTP {
+		t.Fatal("pre-TOTP backup reported a second-factor requirement")
+	}
+	if err := app.ConfirmV2VaultRecovery(prepared.Token, ""); err != nil {
+		t.Fatalf("restore pre-TOTP backup: %v", err)
 	}
 	assertV2RecoveryImmutableFiles(t, immutable)
 	assertFileBytes(t, dataFileV2+".bak", backupBefore)
@@ -512,12 +570,12 @@ func TestV2RecoveryCancelAndExpiryClosePendingKey(t *testing.T) {
 		app, _ := activatedV2App(t, syntheticMigrationVault())
 		app.Logout()
 		corruptV2Primary(t)
-		token, err := app.PrepareV2VaultRecovery(migrationTestPassword)
+		prepared, err := app.PrepareV2VaultRecovery(migrationTestPassword)
 		if err != nil {
 			t.Fatal(err)
 		}
 		pending := pendingV2RecoverySession(app)
-		app.CancelV2VaultRecovery(token)
+		app.CancelV2VaultRecovery(prepared.Token)
 		if pendingV2RecoverySession(app) != nil || pending == nil || !pending.isClosed() {
 			t.Fatal("cancel did not clear and close the pending v2 session")
 		}

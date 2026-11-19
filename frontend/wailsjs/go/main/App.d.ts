@@ -56,9 +56,9 @@ export function Logout():Promise<void>;
 
 export function PrepareV2Migration(arg1:string,arg2:string):Promise<string>;
 
-export function PrepareV2VaultRecovery(arg1:string):Promise<string>;
+export function PrepareV2VaultRecovery(arg1:string):Promise<main.V2RecoveryPreparation>;
 
-export function ConfirmV2VaultRecovery(arg1:string):Promise<boolean>;
+export function ConfirmV2VaultRecovery(arg1:string,arg2:string):Promise<void>;
 
 export function CancelV2VaultRecovery(arg1:string):Promise<void>;
 

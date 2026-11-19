@@ -195,13 +195,35 @@ test('TOTP setup secrets disappear on close; recovery still requires confirmatio
   await page.evaluate(()=>{window.mock.totp=true;window.mock.vault.v2ContainerPresent=false;});
   await page.getByRole('textbox',{name:'Мастер-пароль',exact:true}).fill('Synthetic-master!42');
   await page.getByRole('button',{name:'Восстановить из резервной копии v2',exact:true}).click();
+  const recovery = page.getByRole('dialog', {name:'Восстановить хранилище v2?', exact:true});
+  await expect(recovery.getByRole('button',{name:'Подтвердить',exact:true})).toBeDisabled();
   expect(await page.evaluate(()=>window.mock.calls.some(c=>c.name==='ConfirmV2VaultRecovery'))).toBe(false);
-  await page.getByRole('dialog').getByRole('button',{name:'Подтвердить',exact:true}).click();
-  await expect(page.getByRole('textbox',{name:'Код TOTP',exact:true})).toBeVisible();
   await expect(page.locator('tbody tr')).toHaveCount(0);
-  await page.getByRole('textbox',{name:'Код TOTP',exact:true}).fill('123456');
-  await page.getByRole('button',{name:'Подтвердить код',exact:true}).click();
+  await recovery.getByRole('textbox',{name:'Код TOTP',exact:true}).fill('123456');
+  await recovery.getByRole('button',{name:'Подтвердить',exact:true}).click();
   await expect(page.locator('tbody tr')).toHaveCount(4);
+  expect(await page.evaluate(()=>window.mock.calls.find(c=>c.name==='ConfirmV2VaultRecovery').args))
+    .toEqual(['synthetic-recovery-token','123456']);
+  expect(await page.evaluate(()=>window.mock.calls.some(c=>c.name==='Verify2FA'))).toBe(false);
+});
+
+test('a wrong recovery code keeps the app locked and clears the confirmation form', async ({ page }) => {
+  await installBridge(page);
+  await page.goto('/');
+  const password = page.getByRole('textbox', { name: 'Мастер-пароль', exact: true });
+  const recover = page.getByRole('button', { name: 'Восстановить из резервной копии v2', exact: true });
+  const dialog = page.getByRole('dialog', { name: 'Восстановить хранилище v2?', exact: true });
+  await password.fill('Synthetic-master!42');
+  await recover.click();
+  await dialog.getByLabel('Код TOTP', { exact: true }).fill('654321');
+  await dialog.getByRole('button', { name: 'Подтвердить', exact: true }).click();
+  await expect(page.getByText('Неверный код двухфакторной аутентификации.', { exact: true })).toBeVisible();
+  await expect(dialog).toHaveCount(0);
+  await expect(password).toHaveValue('');
+  await expect(page.locator('.app-shell')).toHaveCount(0);
+  await password.fill('Synthetic-master!42');
+  await recover.click();
+  await expect(dialog.getByLabel('Код TOTP', { exact: true })).toHaveValue('');
 });
 
 test('HIBP errors remain explicit instead of reporting zero leaked passwords',async({page})=>{
