@@ -115,6 +115,8 @@ jobs:
       - name: Package and verify Windows preview ZIP
         id: package-preview
         shell: pwsh
+        env:
+          PREVIEW_PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           $artifactName = 'PasswordSaver-2.5-Preview-Windows-x64'
           $root = [IO.Directory]::CreateTempSubdirectory('passwordsaver-preview-').FullName
@@ -124,11 +126,12 @@ jobs:
           $checksums = Join-Path $root 'SHA256SUMS.txt'
           $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $commitUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA"
 
-          @"
+          $readmeText = @"
           PasswordSaver 2.5 Preview (Windows x64)
 
-          This is a test build for PR #13, not an official release.
+          This preview is for testing only.
           Use only synthetic data in a dedicated Windows test profile.
 
           1. Extract the ZIP to a new folder.
@@ -141,10 +144,13 @@ jobs:
           and compare the hash with SHA256SUMS.txt:
               Get-FileHash -Algorithm SHA256 .\password-saver.exe
 
-          PR: https://github.com/seo79-sec/password-saver/pull/13
-          Commit: $env:GITHUB_SHA
+          Commit: $commitUrl
           Run: $runUrl (attempt $env:GITHUB_RUN_ATTEMPT)
-          "@ | Set-Content -LiteralPath $readme -Encoding utf8
+          "@
+          if ($env:PREVIEW_PR_URL) {
+            $readmeText += "`nPR: $env:PREVIEW_PR_URL"
+          }
+          Set-Content -LiteralPath $readme -Value $readmeText -Encoding utf8
           "$hash  password-saver.exe" | Set-Content -LiteralPath $checksums -Encoding ascii
 
           # Add only the build output and the two generated files.

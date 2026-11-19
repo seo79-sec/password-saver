@@ -139,12 +139,13 @@ CI добавляет браузерные проверки к полным Go/r
 
 ## Ручная проверка Windows перед одобрением
 
-В успешном [запуске CI для PR #13](https://github.com/seo79-sec/password-saver/pull/13/checks)
+В [успешном запуске CI нужной ветки](https://github.com/seo79-sec/password-saver/actions/workflows/ci.yml)
 откройте **Summary** и скачайте **PasswordSaver-2.5-Preview-Windows-x64** в разделе
 **Artifacts**. Войдите в GitHub для скачивания. Артефакт хранится 14 дней.
 Распакуйте скачанный файл, затем вложенный `PasswordSaver-2.5-Preview-Windows-x64.zip`.
 В папке `PasswordSaver` находятся `password-saver.exe`, `README.txt` с номером
-сборки и `SHA256SUMS.txt`. Если WebView2 Runtime отсутствует, установите Microsoft
+сборки, ссылкой на коммит и, для запуска по PR, ссылкой на этот PR. `SHA256SUMS.txt`
+содержит контрольную сумму EXE. Если WebView2 Runtime отсутствует, установите Microsoft
 Edge WebView2 Evergreen Runtime по ссылке в README. Для запуска достаточно EXE
 и WebView2. Проверяйте сборку в отдельном профиле Windows на синтетических данных.
 
