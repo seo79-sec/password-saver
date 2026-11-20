@@ -1,6 +1,6 @@
 # PasswordSaver editions
 
-## PasswordSaver Standard (2.0.0)
+## PasswordSaver Standard (2.5.0)
 
 Standard is the only edition built and supported by this release. Its v2
 Crypto Engine is constructed without optional providers, so new v2 containers
