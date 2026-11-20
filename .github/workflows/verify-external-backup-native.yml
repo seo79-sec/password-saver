@@ -14,6 +14,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the Windows verification driver
+        working-directory: frontend
+        run: npm ci
 
       - name: Get the verified main EXE
         uses: actions/download-artifact@v4
@@ -62,3 +71,6 @@ jobs:
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
+
+      - name: Exercise the real app and native file dialogs
+        run: node frontend/e2e/windows-external-backup-real.mjs
