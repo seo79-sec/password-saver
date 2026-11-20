@@ -316,6 +316,46 @@ function Test-V1Migration($exe, $base, $vaultDir) {
   Note 'Observed separate v2 activation and login after restart with the migrated entry. Both legacy files were retained.'
 }
 
+function Open-RecordActions {
+  $menu = Control 'Действия с записью' ''
+  $menu.SetFocus()
+  [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+}
+
+function Test-EditAndDelete {
+  Add-Record 'Synthetic disposable record'
+  Open-RecordActions
+  Click 'Редактировать'
+  Type-Value 'Название' 'Synthetic edited record'
+  Click 'Сохранить запись'
+  See 'Synthetic edited record'
+  Open-RecordActions
+  Click 'Удалить'
+  Click 'Отмена'
+  See 'Synthetic edited record'
+  Open-RecordActions
+  Click 'Удалить'
+  Click 'Подтвердить'
+  See-CombinedText '0\s*записей в хранилище'
+  Absent 'Synthetic edited record' ''
+}
+
+function Test-IdleWithModal($password, $secret) {
+  Click 'Настройки'
+  Click 'Изменить мастер-пароль'
+  Type-Value 'Текущий мастер-пароль' $password
+  $until = [DateTime]::UtcNow.AddSeconds(78)
+  do {
+    if (Find-Control 'Только у вас.' '' -partial) {
+      Absent 'Текущий мастер-пароль' 'Edit'
+      Login-TestVault $password $secret -AllowLater
+      return
+    }
+    Start-Sleep -Milliseconds 750
+  } while ([DateTime]::UtcNow -lt $until)
+  throw 'The actual session failed to lock while a sensitive dialog was open'
+}
+
 function Test-V2Password($exe, $base, $vaultDir) {
   $fixture = Join-Path $env:GITHUB_WORKSPACE 'crypto/v2/testdata/v2-original.enc'
   $password = 'v2-test-only-master-password'
@@ -331,12 +371,18 @@ function Test-V2Password($exe, $base, $vaultDir) {
   $script:stage = 'original v2 / authenticate old format, add records and TOTP'
   Wait-Window $exe $base
   Login-Consent $password
+  $script:stage = 'original v2 / create, edit, cancel delete and confirm delete'
+  Test-EditAndDelete
   Add-Record $oldTitle
   Add-Record $laterTitle
   $secret = Enable-TOTP
   Click 'Заблокировать'
   Login-TestVault $password $secret -AllowLater
-  Note 'Observed login of the original v2 fixture, record creation, manual lock and TOTP login.'
+  Note 'Observed login of the original v2 fixture, creation, editing, cancellation and confirmed deletion, manual lock and TOTP login.'
+
+  $script:stage = 'original v2 / idle lock closes password dialog'
+  Test-IdleWithModal $password $secret
+  Note 'Observed actual idle lock, disappearance of a sensitive dialog and successful fresh login with TOTP.'
 
   $script:stage = 'original v2 / change known password and compare encrypted files'
   Click 'Настройки'

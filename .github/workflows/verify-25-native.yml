@@ -12,9 +12,9 @@ permissions:
   actions: read
 
 env:
-  PRODUCT_COMMIT: 7392979ba8325c4a10b11ebcaeba40b22cd91e70
-  PRODUCT_RUN: 44795556039
-  PRODUCT_ARTIFACT: PasswordSaver-2.5-Preview-Windows-x64
+  PRODUCT_COMMIT: e28c57ccfa54758c3b97c674393679c2c0a23496
+  PRODUCT_RUN: 44798195313
+  PRODUCT_ARTIFACT: PasswordSaver-Standard-2.5.0-Windows-x64
 
 jobs:
   native:
@@ -26,8 +26,19 @@ jobs:
         include:
           - { scenario: import, totp: enabled, script: external-backup-uia.ps1 }
           - { scenario: import, totp: disabled, script: external-backup-uia.ps1 }
+          - { scenario: restore, totp: enabled, script: external-backup-uia.ps1 }
+          - { scenario: legacy-v1, totp: disabled, script: legacy-regression-uia.ps1 }
+          - { scenario: legacy-v2, totp: enabled, script: legacy-regression-uia.ps1 }
+          - { scenario: recovery-key, totp: enabled, script: recovery-key-uia.ps1 }
+          - { scenario: recovery-key, totp: disabled, script: recovery-key-uia.ps1 }
     steps:
       - uses: actions/checkout@v4
+
+      - name: Wait for CI on the pinned commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch $env:PRODUCT_RUN --repo "$env:GITHUB_REPOSITORY" --interval 15 --exit-status
 
       - name: Download the pinned Windows artifact
         uses: actions/download-artifact@v4
@@ -44,10 +55,8 @@ jobs:
           $zip = Join-Path $root "$env:PRODUCT_ARTIFACT.zip"
           $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
           $outerChecksum = $zip + '.sha256'
-          if (Test-Path -LiteralPath $outerChecksum) {
-            if ((Get-Content -LiteralPath $outerChecksum -Raw).TrimEnd() -cne "$zipHash  $env:PRODUCT_ARTIFACT.zip") {
-              throw 'Downloaded ZIP checksum mismatch'
-            }
+          if ((Get-Content -LiteralPath $outerChecksum -Raw -ErrorAction Stop).TrimEnd() -cne "$zipHash  $env:PRODUCT_ARTIFACT.zip") {
+            throw 'Downloaded ZIP checksum mismatch'
           }
           Expand-Archive -LiteralPath $zip -DestinationPath $root
           $package = Join-Path $root 'PasswordSaver'
