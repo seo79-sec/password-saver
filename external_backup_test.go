@@ -198,3 +198,43 @@ func TestExternalRestorePrimaryWriteFailureLeavesOldPrimaryAndRecoverableCopy(t 
 		t.Fatal("old revisions were lost after failed primary write")
 	}
 }
+
+func TestExternalRestoreArchivesEmptyDamagedPrimary(t *testing.T) {
+	app, _, _ := passwordChangeFixture(t, false)
+	path := filepath.Join(t.TempDir(), "backup.v2.enc")
+	useBackupDialogs(t, path, path)
+	if _, err := app.ExportEncryptedV2Backup(); err != nil {
+		t.Fatal(err)
+	}
+	app.Logout()
+	if err := os.WriteFile(dataFileV2, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	selectExternalBackupForTest(t, app, path)
+	preview, err := app.PrepareExternalV2Restore(migrationTestPassword, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.PrimaryPresent {
+		t.Fatal("damaged empty primary was reported as missing")
+	}
+	if err := app.ConfirmExternalV2Restore(preview.Token); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), dataFileV2+".pre-restore-") && entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Size() == 0 {
+				return
+			}
+		}
+	}
+	t.Fatal("damaged empty primary was not archived")
+}

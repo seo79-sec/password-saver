@@ -273,7 +273,7 @@ func (a *App) PrepareExternalV2Restore(password, totpCode string) (ExternalResto
 		bytes: append([]byte(nil), data...), digest: sha256.Sum256(data),
 		directory: directory, dirInfo: dirInfo, selector: selector,
 		primary: revisionOf(primaryData), backup: revisionOf(backupData),
-		primaryData: append([]byte(nil), primaryData...), backupData: append([]byte(nil), backupData...),
+		primaryData: cloneOptionalRevision(primaryData), backupData: cloneOptionalRevision(backupData),
 	}
 	a.pendingExternalRestore.timer = time.AfterFunc(time.Until(expires), func() {
 		a.mu.Lock()
@@ -293,6 +293,13 @@ func readOptionalV2Revision(path string) ([]byte, error) {
 		return nil, nil
 	}
 	return data, err
+}
+
+func cloneOptionalRevision(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+	return append([]byte{}, data...)
 }
 
 func revisionOf(data []byte) passwordChangeRevision {
