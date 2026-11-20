@@ -9,16 +9,60 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 
+# Native shell dialogs can be owned HWNDs without appearing as immediate
+# children in the desktop's UI Automation tree. Enumerate the app windows
+# first, then use UI Automation to read and invoke the actual controls.
+if (-not ('PWSTestWindows' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PWSTestWindows {
+    private delegate bool Enumerator(IntPtr h, IntPtr arg);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(Enumerator callback, IntPtr arg);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint code);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    public static IntPtr[] ForPid(uint wanted) {
+        var list = new List<IntPtr>();
+        EnumWindows((h, _) => {
+            if (!IsWindowVisible(h)) return true;
+            uint pid;
+            GetWindowThreadProcessId(h, out pid);
+            if (pid != wanted) {
+                var owner = GetWindow(h, 4);
+                if (owner == IntPtr.Zero) return true;
+                GetWindowThreadProcessId(owner, out pid);
+            }
+            if (pid == wanted) list.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
+    }
+    public static string Title(IntPtr h) {
+        var s = new StringBuilder(512);
+        GetWindowText(h, s, s.Capacity);
+        return s.ToString();
+    }
+    public static string Class(IntPtr h) {
+        var s = new StringBuilder(64);
+        GetClassName(h, s, s.Capacity);
+        return s.ToString();
+    }
+}
+'@
+}
+
 function Find-Window($predicate, $seconds) {
-  $root = [Windows.Automation.AutomationElement]::RootElement
-  $pidCondition = [Windows.Automation.PropertyCondition]::new(
-    [Windows.Automation.AutomationElement]::ProcessIdProperty, $AppProcessId)
   $end = [DateTime]::UtcNow.AddSeconds($seconds)
   do {
-    $windows = $root.FindAll([Windows.Automation.TreeScope]::Children, $pidCondition)
-    foreach ($window in $windows) {
+    foreach ($hwnd in [PWSTestWindows]::ForPid($AppProcessId)) {
       try {
-        if ($window.Current.NativeWindowHandle -and (& $predicate $window)) { return $window }
+        $window = [Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if ($null -ne $window -and (& $predicate $window $hwnd)) { return $window }
       } catch [Windows.Automation.ElementNotAvailableException] { }
     }
     Start-Sleep -Milliseconds 150
@@ -47,8 +91,16 @@ function Invoke-Button($element) {
   $element.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 
-$window = Find-Window { param($w) $w.Current.Name -eq $Title } 12
-if ($null -eq $window) { throw 'Native file dialog not found through Windows UI Automation' }
+$window = Find-Window {
+  param($w, $handle)
+  $w.Current.Name -eq $Title -or [PWSTestWindows]::Title($handle) -eq $Title
+} 10
+if ($null -eq $window) {
+  $windows = @([PWSTestWindows]::ForPid($AppProcessId) | ForEach-Object {
+    [PWSTestWindows]::Class($_) + ':' + [PWSTestWindows]::Title($_)
+  }) -join ', '
+  throw "Native file dialog not found. Visible owned windows: $windows"
+}
 
 if ($Action -eq 'cancel') {
   Invoke-Button (Find-Button $window '2' 'Cancel')

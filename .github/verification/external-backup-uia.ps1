@@ -122,7 +122,14 @@ function Close-App {
 function Native-Pick($title, $action, $path, $submitName) {
   $params = @{ AppProcessId = $script:process.Id; Title = $title; Action = $action; ButtonName = $submitName }
   if ($path) { $params.FilePath = $path }
-  $result = & "$PSScriptRoot/native-file-dialog.ps1" @params
+  try { $result = & "$PSScriptRoot/native-file-dialog.ps1" @params }
+  catch {
+    $safeMessages = @('Хранилище заблокировано', 'Операция не выполнена',
+      'выберите файл вне папки', 'Сохранение копии', 'Экспортировать зашифрованную копию')
+    $observed = @($safeMessages | Where-Object { $null -ne (Find-Control $_ '' -partial) })
+    Note ('Visible WebView2 state during file-dialog failure: ' + ($observed -join ', '))
+    throw
+  }
   if (-not ($result -match 'Native file dialog')) { throw 'No native file dialog was observed' }
   if ($result -match 'Native overwrite prompt acknowledged') { Note 'Acknowledged the native Windows overwrite prompt through UI Automation.' }
 }
