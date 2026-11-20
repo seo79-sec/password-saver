@@ -201,7 +201,7 @@ function Test-TOTP($encoding, [int]$offset = 0) {
   try {
     $mac = $hmac.ComputeHash($counter)
     $index = $mac[-1] -band 15
-    $code = (($mac[$index] -band 127) -shl 24) -bor ($mac[$index + 1] -shl 16) -bor ($mac[$index + 2] -shl 8) -bor $mac[$index + 3]
+    $code = (([int] $mac[$index] -band 127) -shl 24) -bor (([int] $mac[$index + 1]) -shl 16) -bor (([int] $mac[$index + 2]) -shl 8) -bor ([int] $mac[$index + 3])
     return '{0:D6}' -f ($code % 1000000)
   } finally {
     $hmac.Dispose()
