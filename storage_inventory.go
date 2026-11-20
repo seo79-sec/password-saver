@@ -101,7 +101,7 @@ func scanVaultDirectoryDetails(directory string, kind storageDirectoryKind) (vau
 				out.TemporaryFiles++
 				continue
 			}
-			limit := int64(maxVaultFileSize)
+			limit := vaultWriteTemporaryLimit()
 			if entry.Name() == storageMigrationReceiptFile {
 				limit = storageReceiptLimit
 			} else if !isVaultDiagnosticArchive(entry.Name()) {

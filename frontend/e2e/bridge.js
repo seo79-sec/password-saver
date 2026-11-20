@@ -32,6 +32,14 @@ export async function installBridge(page, options = {}) {
         state.locked = true;
         state.pending = false;
       },
+      ExportEncryptedV2Backup: async () => options.delayBackupExport ? later('resolveBackupExport') : 'C:\\Synthetic\\backup.v2.enc',
+      SelectExternalV2Backup: async () => 'backup.v2.enc',
+      PrepareExternalV2Restore: async () => options.delayExternalRestore ? later('resolveExternalRestore') : ({
+        token: 'synthetic-external-token', fileName: 'backup.v2.enc', accountCount: 2,
+        totpEnabled: true, primaryPresent: true, backupPresent: true,
+      }),
+      ConfirmExternalV2Restore: async () => { state.locked = true; state.pending = false; },
+      CancelExternalV2Restore: async () => {},
       GetAccounts:async()=>{if(state.locked || state.pending)throw Error('locked');if(options.delayAccounts)return later('resolveAccounts');return copy(state.accounts);},
       AddAccount:async(title,login,password)=>{state.accounts.push({id:String(Date.now()),title,login,password,updatedAt:Date.now()/1000});},
       UpdateAccount:async(id,title,login,password)=>{state.accounts=state.accounts.map(a=>a.id===id?{...a,title,login,password}:a);},

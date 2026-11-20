@@ -23,6 +23,7 @@
     Logout, GetAccounts, AddAccount, DeleteAccount, ResetVault, UpdateAccount, ChangeMasterPassword,
     BeginVaultReset, CancelVaultReset, PrepareVaultRecovery, ConfirmVaultRecovery, CancelVaultRecovery,
     PrepareV2VaultRecovery, ConfirmV2VaultRecovery, CancelV2VaultRecovery,
+    ExportEncryptedV2Backup, SelectExternalV2Backup, PrepareExternalV2Restore, ConfirmExternalV2Restore, CancelExternalV2Restore,
     Generate2FA, ConfirmAndEnable2FA, Verify2FA, SetIdleTimeout, TouchActivity, IsLocked, CheckInactivity
   } from '../wailsjs/go/main/App.js';
   import { createClipboardController, createGenerationGuard, resolveForGeneration, resolveCapabilityForGeneration, checkHIBPPasswords, IDLE_MINUTES, CLIPBOARD_SECONDS, validChoice, toggleSecretVisibility, loginModeForVaultStatus, canOfferV2BackupRecovery, friendlyBackendError } from './security.js';
@@ -53,6 +54,14 @@
   let passwordChangeOpen = false;
   let passwordChangeBusy = false;
   let passwordChangeError = '';
+  let exportBusy = false;
+  let externalRestoreOpen = false;
+  let externalRestoreBusy = false;
+  let externalRestoreFileName = '';
+  let externalRestorePassword = '';
+  let externalRestoreTOTP = '';
+  let externalRestorePreview = null;
+  let externalRestoreError = '';
   $: canChangeMasterPassword = isLoggedIn && storageStatus.state === 'ready' && vaultStatus.state === 'v2-active';
 
   let accounts = [];
@@ -212,6 +221,7 @@
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
     closeMasterPasswordChange();
+    closeExternalRestore(); exportBusy = false;
     recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
@@ -259,6 +269,7 @@
       if (passwordChangeBusy) Logout().catch(() => {});
       closeStorageMigrationModal();
       closeMasterPasswordChange();
+      closeExternalRestore();
       cancelBreachCheck();
       clipboardController?.cancel();
       close2FASetup();
@@ -277,6 +288,92 @@
     passwordChangeOpen = false;
     passwordChangeBusy = false;
     passwordChangeError = '';
+  }
+
+  function closeExternalRestore() {
+    if (externalRestorePreview?.token) CancelExternalV2Restore(externalRestorePreview.token).catch(() => {});
+    else CancelExternalV2Restore('').catch(() => {});
+    externalRestoreOpen = false;
+    externalRestoreBusy = false;
+    externalRestoreFileName = '';
+    externalRestorePassword = '';
+    externalRestoreTOTP = '';
+    externalRestorePreview = null;
+    externalRestoreError = '';
+  }
+
+  async function selectExternalBackup() {
+    if (!externalRestoreOpen || externalRestoreBusy || externalRestorePreview) return;
+    const generation = sessionGeneration.capture();
+    externalRestoreBusy = true; externalRestoreError = '';
+    try {
+      const fileName = await SelectExternalV2Backup();
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen && !isLoggedIn) externalRestoreFileName = fileName || '';
+      else CancelExternalV2Restore('').catch(() => {});
+    } catch (error) {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) externalRestoreError = friendlyBackendError(error);
+    } finally {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) externalRestoreBusy = false;
+    }
+  }
+
+  async function exportEncryptedBackup() {
+    if (!isLoggedIn || exportBusy || vaultStatus.state !== 'v2-active') return;
+    const generation = sessionGeneration.capture();
+    exportBusy = true;
+    try {
+      const path = await ExportEncryptedV2Backup();
+      if (sessionGeneration.isCurrent(generation) && path) toastMessage = 'Зашифрованная копия сохранена и проверена.';
+    } catch (error) {
+      if (sessionGeneration.isCurrent(generation)) toastMessage = friendlyBackendError(error);
+    } finally {
+      if (sessionGeneration.isCurrent(generation)) exportBusy = false;
+    }
+  }
+
+  async function prepareExternalRestore() {
+    if (!externalRestoreOpen || externalRestoreBusy || externalRestorePreview || !externalRestoreFileName || !externalRestorePassword) return;
+    const generation = sessionGeneration.capture();
+    const password = externalRestorePassword;
+    const code = externalRestoreTOTP;
+    externalRestorePassword = ''; externalRestoreTOTP = '';
+    externalRestoreFileName = '';
+    externalRestoreBusy = true; externalRestoreError = '';
+    try {
+      const preview = await PrepareExternalV2Restore(password, code);
+      if (!sessionGeneration.isCurrent(generation) || !externalRestoreOpen || isLoggedIn) {
+        if (preview?.token) CancelExternalV2Restore(preview.token).catch(() => {});
+        return;
+      }
+      if (preview?.token) externalRestorePreview = preview;
+    } catch (error) {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) externalRestoreError = friendlyBackendError(error);
+    } finally {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) externalRestoreBusy = false;
+    }
+  }
+
+  async function confirmExternalRestore() {
+    if (!externalRestoreOpen || externalRestoreBusy || !externalRestorePreview?.token) return;
+    const generation = sessionGeneration.capture();
+    const token = externalRestorePreview.token;
+    externalRestoreBusy = true; externalRestoreError = '';
+    try {
+      await ConfirmExternalV2Restore(token);
+      if (!sessionGeneration.isCurrent(generation) || !externalRestoreOpen) return;
+      closeExternalRestore();
+      masterPassword = ''; errorMessage = '';
+      lockReason = 'Зашифрованная копия восстановлена. Войдите с её мастер-паролем.';
+      await refreshVaultStatus();
+    } catch (error) {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) {
+        externalRestorePreview = null;
+        externalRestoreError = friendlyBackendError(error);
+        await refreshVaultStatus();
+      }
+    } finally {
+      if (sessionGeneration.isCurrent(generation) && externalRestoreOpen) externalRestoreBusy = false;
+    }
   }
 
   async function submitMasterPasswordChange({ current, next, confirmation, totpCode }) {
@@ -871,6 +968,12 @@
         </button>
       {/if}
 
+      {#if storageStatus.state === 'ready' && vaultStatus.state === 'v2-active' && !show2FAInput}
+        <button class="btn-secondary" disabled={recoveryBusy || externalRestoreBusy} on:click={() => { externalRestoreOpen = true; externalRestoreError = ''; }}>
+          Восстановить из внешней зашифрованной копии v2
+        </button>
+      {/if}
+
       {#if errorMessage}
         <p class="error">{errorMessage}</p>
       {/if}
@@ -894,7 +997,7 @@
         <StorageStatusBar storage={storageStatus} on:click={() => handleLogout('Хранилище заблокировано')}/>
       </div>
     {:else if activeView === 'vaults'}
-      <StorageView storage={storageStatus} vault={vaultStatus} on:click={() => openVaultFolder(false)}>
+      <StorageView storage={storageStatus} vault={vaultStatus} {exportBusy} on:click={() => openVaultFolder(false)} on:export={exportEncryptedBackup}>
         {#if vaultStatus.state === 'v1-active' || vaultStatus.state === 'v1-prepared'}
           <div class="button-row"><button class="primary-button" disabled={migrationBusy || (vaultStatus.state === 'v1-prepared' && !vaultStatus.v2ContainerPresent)} on:click={openMigrationModal}>Подготовить переход на v2</button>{#if vaultStatus.state === 'v1-prepared'}<button class="secondary-button" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>{/if}</div>
         {/if}
@@ -915,6 +1018,28 @@
 {#if passwordChangeOpen && isLoggedIn}
   <MasterPasswordDialog busy={passwordChangeBusy} error={passwordChangeError} {totpEnabled}
     on:changePassword={event => submitMasterPasswordChange(event.detail)} on:close={closeMasterPasswordChange}/>
+{/if}
+{#if externalRestoreOpen && !isLoggedIn}
+  <Modal title="Восстановить из внешней копии v2" busy={externalRestoreBusy} on:close={closeExternalRestore}>
+    {#if !externalRestorePreview}
+      <p class="dialog-message">Выберите созданный PasswordSaver зашифрованный контейнер. Проверка пароля, версии и TOTP выполняется до изменения файлов. Непроверенные копии не восстанавливаются.</p>
+      <div class="dialog-buttons"><button class="secondary-button" disabled={externalRestoreBusy} on:click={selectExternalBackup}>Выбрать файл</button>{#if externalRestoreFileName}<span>{externalRestoreFileName}</span>{/if}</div>
+      {#if externalRestoreFileName}
+      <label class="migration-label">Мастер-пароль копии
+        <input type="password" bind:value={externalRestorePassword} autocomplete="current-password" disabled={externalRestoreBusy} />
+      </label>
+      <label class="migration-label">Код TOTP копии, если он был включён
+        <input type="text" bind:value={externalRestoreTOTP} inputmode="numeric" maxlength="6" autocomplete="one-time-code" disabled={externalRestoreBusy} />
+      </label>
+      {/if}
+      <div class="dialog-buttons"><button class="secondary-button" disabled={externalRestoreBusy} on:click={closeExternalRestore}>Отмена</button>{#if externalRestoreFileName}<button class="primary-button" disabled={externalRestoreBusy || !externalRestorePassword} on:click={prepareExternalRestore}>{externalRestoreBusy ? 'Проверка…' : 'Проверить копию'}</button>{/if}</div>
+    {:else}
+      <p class="dialog-message"><strong>Проверенная копия:</strong> {externalRestorePreview.fileName}<br />Записей: {externalRestorePreview.accountCount}. TOTP: {externalRestorePreview.totpEnabled ? 'включён' : 'выключен'}.</p>
+      <p class="dialog-message">Текущие основной файл и штатная резервная копия будут сохранены как диагностические архивы. После подтверждения их заменит выбранная копия. Изменения, сделанные позже её создания, могут отсутствовать. Старые копии по-прежнему открываются прежними паролями. Автоматической проверки свежести нет.</p>
+      <div class="dialog-buttons"><button class="secondary-button" disabled={externalRestoreBusy} on:click={closeExternalRestore}>Не восстанавливать</button><button class="primary-button" disabled={externalRestoreBusy} on:click={confirmExternalRestore}>{externalRestoreBusy ? 'Восстановление…' : 'Подтвердить восстановление'}</button></div>
+    {/if}
+    {#if externalRestoreError}<p class="error" role="alert">{externalRestoreError}</p>{/if}
+  </Modal>
 {/if}
 {#if editorOpen && isLoggedIn}<PasswordEditor bind:title={newTitle} bind:login={newLogin} bind:password={newPass} bind:category={selectedCategory} editing={!!editingId} busy={editorBusy} on:save={handleSave} on:close={closeEditor} on:generate={e => generatePassword(e.detail)}/>{/if}
 {#if dialog.show}

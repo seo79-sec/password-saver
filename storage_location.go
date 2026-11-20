@@ -168,7 +168,8 @@ type vaultFileInventory struct {
 }
 
 func isVaultDiagnosticArchive(name string) bool {
-	return strings.HasPrefix(name, dataFile+".corrupt-") || strings.HasPrefix(name, dataFileV2+".corrupt-")
+	return strings.HasPrefix(name, dataFile+".corrupt-") || strings.HasPrefix(name, dataFileV2+".corrupt-") ||
+		strings.HasPrefix(name, dataFileV2+".pre-restore-") || strings.HasPrefix(name, dataFileV2+".bak.pre-restore-")
 }
 
 func v2ContainerFileLimit() int64 { return cryptov2.MaxContainerSize }

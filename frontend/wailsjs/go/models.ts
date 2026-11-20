@@ -1,5 +1,26 @@
 export namespace main {
 
+	export class ExternalRestorePreview {
+	    token: string;
+	    fileName: string;
+	    accountCount: number;
+	    totpEnabled: boolean;
+	    primaryPresent: boolean;
+	    backupPresent: boolean;
+
+	    static createFrom(source: any = {}) { return new ExternalRestorePreview(source); }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.token = source["token"];
+	        this.fileName = source["fileName"];
+	        this.accountCount = source["accountCount"];
+	        this.totpEnabled = source["totpEnabled"];
+	        this.primaryPresent = source["primaryPresent"];
+	        this.backupPresent = source["backupPresent"];
+	    }
+	}
+
     export class LegacyStorageSelection {
         token: string;
         path: string;

@@ -12,6 +12,8 @@ export function CancelVaultRecovery(arg1:string):Promise<void>;
 
 export function CancelVaultReset(arg1:string):Promise<void>;
 
+export function CancelExternalV2Restore(arg1:string):Promise<void>;
+
 export function ChangeMasterPassword(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function CheckInactivity():Promise<boolean>;
@@ -26,7 +28,11 @@ export function ConfirmV2Migration(arg1:string,arg2:string,arg3:string):Promise<
 
 export function ConfirmVaultRecovery(arg1:string):Promise<boolean>;
 
+export function ConfirmExternalV2Restore(arg1:string):Promise<void>;
+
 export function DeleteAccount(arg1:string):Promise<void>;
+
+export function ExportEncryptedV2Backup():Promise<string>;
 
 export function Generate2FA():Promise<main.TOTPSetup>;
 
@@ -57,6 +63,10 @@ export function Logout():Promise<void>;
 export function PrepareV2Migration(arg1:string,arg2:string):Promise<string>;
 
 export function PrepareV2VaultRecovery(arg1:string):Promise<string>;
+
+export function PrepareExternalV2Restore(arg1:string,arg2:string):Promise<main.ExternalRestorePreview>;
+
+export function SelectExternalV2Backup():Promise<string>;
 
 export function ConfirmV2VaultRecovery(arg1:string):Promise<boolean>;
 

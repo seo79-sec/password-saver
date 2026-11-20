@@ -32,6 +32,10 @@ type App struct {
 	pendingReset               resetChallenge
 	pendingRecover             recoveryChallenge
 	pendingV2Recover           v2RecoveryChallenge
+	pendingExternalRestore     externalRestoreChallenge
+	selectedExternalBackup     string
+	backupDialogGeneration     uint64
+	backupDialogOpen           bool
 	pendingStorageMigration    storageMigrationChallenge
 	selectedLegacyStorage      legacyStorageSelection
 	storageSelectionGeneration uint64
@@ -709,6 +713,10 @@ func (a *App) clearPendingChallengesLocked() {
 	a.pendingReset = resetChallenge{}
 	a.clearPendingRecoveryLocked()
 	a.clearPendingV2RecoveryLocked()
+	a.clearPendingExternalRestoreLocked()
+	a.selectedExternalBackup = ""
+	a.backupDialogGeneration++
+	a.backupDialogOpen = false
 	a.clearPendingStorageMigrationLocked()
 	a.clearLegacyStorageSelectionLocked()
 }
