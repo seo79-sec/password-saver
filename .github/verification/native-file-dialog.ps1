@@ -24,6 +24,10 @@ public static class PWSTestWindows {
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint code);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+    public static bool Close(IntPtr h) { return PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); }
+    public static bool Click(IntPtr h) { return PostMessage(h, 0x00F5, IntPtr.Zero, IntPtr.Zero); }
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
     public static IntPtr[] ForPid(uint wanted) {
@@ -91,6 +95,18 @@ function Invoke-Button($element) {
   $element.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 
+function Wait-Value($find, [int]$seconds = 8) {
+  $until = [DateTime]::UtcNow.AddSeconds($seconds)
+  do {
+    try {
+      $item = & $find
+      if ($null -ne $item) { return $item }
+    } catch [Windows.Automation.ElementNotAvailableException] { }
+    Start-Sleep -Milliseconds 200
+  } while ([DateTime]::UtcNow -lt $until)
+  return $null
+}
+
 $window = Find-Window {
   param($w, $handle)
   $w.Current.Name -eq $Title -or [PWSTestWindows]::Title($handle) -eq $Title
@@ -102,27 +118,55 @@ if ($null -eq $window) {
   throw "Native file dialog not found. Visible owned windows: $windows"
 }
 
+$dialogHandle = [IntPtr] $window.Current.NativeWindowHandle
+if ($dialogHandle -eq [IntPtr]::Zero) {
+  $dialogHandle = [PWSTestWindows]::ForPid($AppProcessId) | Where-Object { [PWSTestWindows]::Title($_) -eq $Title } | Select-Object -First 1
+}
+if (-not $dialogHandle) { throw 'Native file dialog handle missing' }
+
 if ($Action -eq 'cancel') {
-  Invoke-Button (Find-Button $window '2' 'Cancel')
-  Write-Output 'Native file dialog and Cancel invoked via UI Automation'
+  $cancel = Wait-Value { Find-Button $window '2' 'Cancel' } 4
+  if ($null -ne $cancel) {
+    Invoke-Button $cancel
+  } else {
+    $nativeCancel = [PWSTestWindows]::GetDlgItem($dialogHandle, 2)
+    if ($nativeCancel -ne 0) {
+      if (![PWSTestWindows]::Click($nativeCancel)) { throw 'Native Cancel button rejected the click' }
+    } elseif (![PWSTestWindows]::Close($dialogHandle)) { throw 'Native file dialog rejected close' }
+  }
+  $same = Find-Window { param($w, $h) $h -eq $dialogHandle } 1
+  $until = [DateTime]::UtcNow.AddSeconds(6)
+  while ($null -ne $same -and [DateTime]::UtcNow -lt $until) {
+    $same = Find-Window { param($w, $h) $h -eq $dialogHandle } 1
+  }
+  if ($same) { throw 'Native file dialog stayed open after cancel' }
+  Write-Output 'Native file dialog cancellation observed'
   return
 }
 
-$nameControl = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1148'
-$edit = $null
-if ($null -ne $nameControl -and $nameControl.Current.ControlType -eq [Windows.Automation.ControlType]::Edit) {
-  $edit = $nameControl
-} elseif ($null -ne $nameControl) {
-  $edit = Find-Control $nameControl ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit)
-}
-if ($null -eq $edit) {
-  $edit = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1001'
+$edit = Wait-Value {
+  $nameControl = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1148'
+  $edit = $null
+  if ($null -ne $nameControl -and $nameControl.Current.ControlType -eq [Windows.Automation.ControlType]::Edit) {
+    $edit = $nameControl
+  } elseif ($null -ne $nameControl) {
+    $edit = Find-Control $nameControl ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit)
+  }
+  if ($null -eq $edit) {
+    $edit = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1001'
+  }
+  $edit
 }
 if ($null -eq $edit) { throw 'Native file-name field was not found' }
 $value = $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
 $value.SetValue($FilePath)
 if ($value.Current.Value -cne $FilePath) { throw 'File-name field did not retain the chosen path' }
-Invoke-Button (Find-Button $window '1' $buttonName)
+$submit = Wait-Value { Find-Button $window '1' $buttonName }
+if ($null -ne $submit) { Invoke-Button $submit }
+else {
+  $nativeSubmit = [PWSTestWindows]::GetDlgItem($dialogHandle, 1)
+  if ($nativeSubmit -eq 0 -or ![PWSTestWindows]::Click($nativeSubmit)) { throw 'Expected native dialog submit button was not found' }
+}
 
 if ($Action -eq 'overwrite') {
   $confirm = Find-Window {
