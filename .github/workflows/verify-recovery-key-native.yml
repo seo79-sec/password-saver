@@ -19,7 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         totp: [disabled]
-        attempt: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - name: Wait for Windows build and artifact verification

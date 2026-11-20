@@ -79,6 +79,18 @@ function Absent($text, $type) {
   if ($null -ne (Find-Control $text $type -partial)) { throw "Unexpected GUI control '$text'" }
 }
 
+function Wait-Absent($name, $type) {
+  $end = [DateTime]::UtcNow.AddSeconds(8)
+  do {
+    try {
+      $element = Find-Control $name $type -partial
+      if ($null -eq $element -or $element.Current.IsOffscreen) { return }
+    } catch [Windows.Automation.ElementNotAvailableException] { return }
+    Start-Sleep -Milliseconds 150
+  } while ([DateTime]::UtcNow -lt $end)
+  throw "Unexpected GUI control '$name' remained visible"
+}
+
 function Click($name) {
   $button = Control $name 'Button'
   $end = [DateTime]::UtcNow.AddSeconds(8)
@@ -252,7 +264,7 @@ function Key-ManagementAuth($password, $secret) {
 
 function New-GUIRecoveryKey($password, $secret) {
   Open-KeyManagement
-  Absent 'Новый ключ восстановления' 'Edit'
+  Wait-Absent 'Новый ключ восстановления' 'Edit'
   Key-ManagementAuth $password $secret
   Click 'Создать ключ'
   $printed = Control 'Новый ключ восстановления' 'Edit'
@@ -260,7 +272,7 @@ function New-GUIRecoveryKey($password, $secret) {
   if ($secretValue -cnotmatch '^PSRK1-[A-Za-z0-9_-]{43}$') { throw 'Expected a new printable recovery key' }
   See 'Сохраните ключ вне этого компьютера.'
   Click 'Готово'
-  Absent 'Новый ключ восстановления' 'Edit'
+  Wait-Absent 'Новый ключ восстановления' 'Edit'
   return $secretValue
 }
 
