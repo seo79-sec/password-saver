@@ -124,3 +124,13 @@ func (s *Session) IsClosed() bool {
 	defer s.mu.Unlock()
 	return s.closed
 }
+
+// HasRecoveryKey reports whether this authenticated container has a slot.
+func (s *Session) HasRecoveryKey() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed && s.container.Recovery != nil
+}

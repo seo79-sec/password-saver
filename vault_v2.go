@@ -348,6 +348,10 @@ func readV2FileSnapshot(path string) ([]byte, os.FileInfo, error) {
 }
 
 func writeFileAtomicNoReplace(path string, data []byte) error {
+	return writeFileAtomicNoReplaceChecked(path, data, nil)
+}
+
+func writeFileAtomicNoReplaceChecked(path string, data []byte, beforeRename func() error) error {
 	dir := filepath.Dir(path)
 	if err := ensurePathAbsent(path); err != nil {
 		return err
@@ -372,6 +376,11 @@ func writeFileAtomicNoReplace(path string, data []byte) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return err
+	}
+	if beforeRename != nil {
+		if err := beforeRename(); err != nil {
+			return err
+		}
 	}
 	if err := createVaultFileNoReplace(tmpName, path); err != nil {
 		if _, statErr := os.Lstat(path); statErr == nil {

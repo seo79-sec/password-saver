@@ -155,13 +155,18 @@ func recoveryHeaderIsUnsupported(data []byte) bool {
 	if hasFormat && format != cryptov2.FormatID {
 		return true
 	}
-	if hasFormat && format == cryptov2.FormatID && hasVersion && version != cryptov2.FormatVersion {
+	if hasFormat && format == cryptov2.FormatID && hasVersion && version != cryptov2.FormatVersion && version != cryptov2.RecoveryFormatVersion {
 		return true
 	}
 	if hasFormat && hasAEAD && aead != cryptov2.AEADAES256GCM {
 		return true
 	}
 	if hasFormat {
+		slot, duplicate := readPartialJSONObject(fields["recovery"])
+		slotVersion, hasSlotVersion := rawJSONUint(slot["version"])
+		if duplicate || (hasSlotVersion && slotVersion != cryptov2.RecoverySlotVersion) {
+			return true
+		}
 		var kdf struct {
 			ID      string `json:"id"`
 			Version uint32 `json:"version"`

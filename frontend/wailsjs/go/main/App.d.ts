@@ -8,6 +8,8 @@ export function BeginCancelV2Preparation():Promise<string>;
 
 export function BeginVaultReset():Promise<string>;
 
+export function CancelRecoveryKeyReset(arg1:string):Promise<void>;
+
 export function CancelVaultRecovery(arg1:string):Promise<void>;
 
 export function CancelVaultReset(arg1:string):Promise<void>;
@@ -17,6 +19,10 @@ export function CancelExternalV2Restore(arg1:string):Promise<void>;
 export function ChangeMasterPassword(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function CheckInactivity():Promise<boolean>;
+
+export function ConfirmRecoveryKeyReset(arg1:string):Promise<void>;
+
+export function CreateRecoveryKey(arg1:string,arg2:string):Promise<string>;
 
 export function CreateV2Vault(arg1:string):Promise<void>;
 
@@ -32,6 +38,8 @@ export function ConfirmExternalV2Restore(arg1:string):Promise<void>;
 
 export function DeleteAccount(arg1:string):Promise<void>;
 
+export function DisableRecoveryKey(arg1:string,arg2:string):Promise<void>;
+
 export function ExportEncryptedV2Backup():Promise<string>;
 
 export function Generate2FA():Promise<main.TOTPSetup>;
@@ -45,6 +53,8 @@ export function GetStorageLocationStatus():Promise<main.StorageLocationStatus>;
 export function OpenStorageFolder():Promise<void>;
 
 export function OpenLegacyStorageFolder():Promise<void>;
+
+export function PrepareRecoveryKeyReset(arg1:string,arg2:string,arg3:string,arg4:string,arg5:boolean):Promise<string>;
 
 export function PrepareStorageLocationMigration(arg1:string,arg2:string):Promise<string>;
 
@@ -97,3 +107,5 @@ export function CheckSelectedExternalV2Backup(arg1:string,arg2:string,arg3:strin
 export function ConfirmExternalV2Import(arg1:string,arg2:Array<main.ExternalImportChoice>):Promise<number>;
 
 export function CancelExternalV2Import(arg1:string):Promise<void>;
+
+export function VerifyRecoveryKey(arg1:string,arg2:string,arg3:string):Promise<void>;

@@ -287,7 +287,7 @@ func TestV2RecoveryRefusesUnsupportedPrimaryWithoutChangingFiles(t *testing.T) {
 		name   string
 		mutate func(*cryptov2.Container)
 	}{
-		{name: "unsupported version", mutate: func(c *cryptov2.Container) { c.Version = 3 }},
+		{name: "unsupported version", mutate: func(c *cryptov2.Container) { c.Version = cryptov2.RecoveryFormatVersion + 1 }},
 		{name: "unknown algorithm", mutate: func(c *cryptov2.Container) { c.AEAD = "future-aead" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {

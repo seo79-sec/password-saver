@@ -14,6 +14,10 @@ export function BeginVaultReset() {
   return window['go']['main']['App']['BeginVaultReset']();
 }
 
+export function CancelRecoveryKeyReset(arg1) {
+  return window['go']['main']['App']['CancelRecoveryKeyReset'](arg1);
+}
+
 export function CancelVaultRecovery(arg1) {
   return window['go']['main']['App']['CancelVaultRecovery'](arg1);
 }
@@ -32,6 +36,14 @@ export function ChangeMasterPassword(arg1, arg2, arg3, arg4) {
 
 export function CheckInactivity() {
   return window['go']['main']['App']['CheckInactivity']();
+}
+
+export function ConfirmRecoveryKeyReset(arg1) {
+  return window['go']['main']['App']['ConfirmRecoveryKeyReset'](arg1);
+}
+
+export function CreateRecoveryKey(arg1, arg2) {
+  return window['go']['main']['App']['CreateRecoveryKey'](arg1, arg2);
 }
 
 export function CreateV2Vault(arg1) {
@@ -62,6 +74,10 @@ export function DeleteAccount(arg1) {
   return window['go']['main']['App']['DeleteAccount'](arg1);
 }
 
+export function DisableRecoveryKey(arg1, arg2) {
+  return window['go']['main']['App']['DisableRecoveryKey'](arg1, arg2);
+}
+
 export function ExportEncryptedV2Backup() {
   return window['go']['main']['App']['ExportEncryptedV2Backup']();
 }
@@ -88,6 +104,10 @@ export function OpenStorageFolder() {
 
 export function OpenLegacyStorageFolder() {
   return window['go']['main']['App']['OpenLegacyStorageFolder']();
+}
+
+export function PrepareRecoveryKeyReset(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['PrepareRecoveryKeyReset'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function PrepareStorageLocationMigration(arg1, arg2) {
@@ -192,4 +212,8 @@ export function ConfirmExternalV2Import(arg1, arg2) {
 
 export function CancelExternalV2Import(arg1) {
   return window['go']['main']['App']['CancelExternalV2Import'](arg1);
+}
+
+export function VerifyRecoveryKey(arg1, arg2, arg3) {
+  return window['go']['main']['App']['VerifyRecoveryKey'](arg1, arg2, arg3);
 }

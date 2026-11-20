@@ -15,6 +15,7 @@
   import SettingsView from './components/SettingsView.svelte';
   import MasterPasswordDialog from './components/MasterPasswordDialog.svelte';
   import ExternalBackupDialog from './components/ExternalBackupDialog.svelte';
+  import RecoveryKeyDialog from './components/RecoveryKeyDialog.svelte';
   import { validView, getThemeController, auditPasswords, filterAccounts } from './ui.js';
   import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
@@ -57,6 +58,7 @@
   let passwordChangeError = '';
   let exportBusy = false;
   let externalBackupMode = null;
+  let recoveryKeyMode = null;
   let externalImportWriting = false;
   let externalRestoreOpen = false;
   let externalRestoreBusy = false;
@@ -225,6 +227,7 @@
     closeStorageMigrationModal();
     closeMasterPasswordChange();
     closeExternalRestore(); exportBusy = false; externalBackupMode = null; externalImportWriting = false;
+    recoveryKeyMode = null;
     recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
@@ -286,6 +289,8 @@
       message = 'Сессия закрыта во время смены пароля. Сначала попробуйте войти с новым паролем.';
     } else if (externalImportWriting) {
       message = 'Сессия закрыта. Проверьте записи после входа перед повтором импорта.';
+    } else if (recoveryKeyMode === 'manage') {
+      message = 'Сессия закрыта. Если меняли ключ восстановления, проверьте его после входа или создайте новый.';
     }
     clearSensitiveState(message);
   }
@@ -986,6 +991,8 @@
       {/if}
 
       {#if storageStatus.state === 'ready' && vaultStatus.state === 'v2-active' && !show2FAInput}
+        <button class="btn-secondary" disabled={authBusy || recoveryBusy || externalRestoreBusy}
+          on:click={() => { masterPassword = ''; recoveryKeyMode = 'recover'; }}>Забыли мастер-пароль? Восстановить по ключу</button>
         <button class="btn-secondary" disabled={recoveryBusy || externalRestoreBusy} on:click={() => { externalRestoreOpen = true; externalRestoreError = ''; }}>
           Восстановить из внешней зашифрованной копии v2
         </button>
@@ -1025,7 +1032,8 @@
     {:else if activeView === 'settings'}
       <SettingsView {theme} {idleMinutes} {clipboardSeconds} {canChangeMasterPassword} vaultState={vaultStatus.state}
         on:theme={e => setTheme(e.detail)} on:idle={e => setIdlePreference(e.detail)} on:clipboard={e => setClipboardPreference(e.detail)} on:about={() => showAbout = true}
-        on:changePassword={() => { if (canChangeMasterPassword) passwordChangeOpen = true; }}/>
+        on:changePassword={() => { if (canChangeMasterPassword) passwordChangeOpen = true; }}
+        on:recoveryKey={() => { if (canChangeMasterPassword) recoveryKeyMode = 'manage'; }}/>
     {:else if activeView === 'devices'}
       <header class="page-heading"><div><h1>Устройства</h1><p>Ваши пароли сейчас доступны на этом устройстве</p></div></header>
       <section class="panel future-feature"><span class="future-icon"><Icon name="devices" size={45}/></span><span class="edition-badge">PASSWORDSAVER 3.0</span><h2>Ваши устройства. Одно безопасное пространство.</h2><p class="muted">Подключение устройств и телефона по QR-коду появится в PasswordSaver 3.0. В этой версии нет синхронизации, USB-ключей и подключённых мобильных устройств.</p></section>
@@ -1036,6 +1044,11 @@
 {#if passwordChangeOpen && isLoggedIn}
   <MasterPasswordDialog busy={passwordChangeBusy} error={passwordChangeError} {totpEnabled}
     on:changePassword={event => submitMasterPasswordChange(event.detail)} on:close={closeMasterPasswordChange}/>
+{/if}
+{#if (recoveryKeyMode === 'recover' && !isLoggedIn && !show2FAInput) || (recoveryKeyMode === 'manage' && isLoggedIn)}
+  <RecoveryKeyDialog recover={recoveryKeyMode === 'recover'} {totpEnabled} on:close={() => recoveryKeyMode = null}
+    on:reset={() => { errorMessage = ''; clearSensitiveState('Мастер-пароль изменён. Войдите с новым паролем. Для будущего восстановления создайте новый ключ.'); refreshVaultStatus(); }}
+    on:locked={event => clearSensitiveState('Сессия закрыта. ' + event.detail)}/>
 {/if}
 {#if externalBackupMode && isLoggedIn}
   <ExternalBackupDialog forImport={externalBackupMode === 'import'} on:close={() => externalBackupMode = null}
