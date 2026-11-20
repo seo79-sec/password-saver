@@ -115,7 +115,9 @@ function Wait-Window($exe, $profile) {
   $psi.UseShellExecute = $false
   $psi.EnvironmentVariables['LOCALAPPDATA'] = Join-Path $profile 'Local'
   $psi.EnvironmentVariables['APPDATA'] = Join-Path $profile 'Roaming'
+  $psi.RedirectStandardError = $true
   $script:process = [Diagnostics.Process]::Start($psi)
+  $script:appStderr = $script:process.StandardError.ReadToEndAsync()
   $end = [DateTime]::UtcNow.AddSeconds(20)
   do {
     $script:process.Refresh()
@@ -400,9 +402,11 @@ function Test-BackupProfile($withTOTP) {
 }
 
 try {
-  Test-BackupProfile $false
-  Test-BackupProfile $true
-  Note 'Both real Windows EXE and native file dialog scenarios passed in separate disposable LOCALAPPDATA profiles.'
+  $session = (Get-Process -Id $PID).SessionId
+  if ($session -eq 0 -or ![Environment]::UserInteractive) { throw 'No interactive Windows desktop is available' }
+  $mode = $env:PASSWORDSAVER_TEST_TOTP
+  Test-BackupProfile ($mode -eq 'enabled')
+  Note ("Native EXE and file dialogs passed using a disposable LOCALAPPDATA profile with TOTP " + $mode + ".")
 } catch {
   # Errors contain only the current step and type. Never publish an exception
   # from a value/input provider, which might include the synthetic value.

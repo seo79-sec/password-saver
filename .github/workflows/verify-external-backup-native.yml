@@ -12,6 +12,10 @@ jobs:
   native-windows:
     runs-on: windows-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        totp: [disabled, enabled]
     steps:
       - uses: actions/checkout@v4
       - name: Get the verified main EXE
@@ -38,39 +42,8 @@ jobs:
           "PASSWORDSAVER_TEST_EXE=$exe" >> $env:GITHUB_ENV
           Write-Output "::notice title=Verified Windows EXE::Commit $commit, SHA-256 $hash, source run 44656038019."
 
-      - name: Probe the hosted Windows desktop
-        shell: pwsh
-        run: |
-          $session = (Get-Process -Id $PID).SessionId
-          $interactive = [Environment]::UserInteractive
-          Write-Output "::notice title=Windows desktop probe::Session=$session; UserInteractive=$interactive"
-          $testRoot = Join-Path $env:RUNNER_TEMP 'passwordsaver-native-desktop-probe'
-          $env:LOCALAPPDATA = Join-Path $testRoot 'Local'
-          $env:APPDATA = Join-Path $testRoot 'Roaming'
-          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $testRoot 'WebView2'
-          New-Item -ItemType Directory -Path $env:LOCALAPPDATA, $env:APPDATA, $env:WEBVIEW2_USER_DATA_FOLDER -Force | Out-Null
-          $process = Start-Process -FilePath $env:PASSWORDSAVER_TEST_EXE -WorkingDirectory $testRoot -PassThru
-          try {
-            for ($i = 0; $i -lt 20; $i++) {
-              $process.Refresh()
-              if ($process.HasExited) { throw "EXE exited before desktop probe, code $($process.ExitCode)" }
-              if ($process.MainWindowHandle -ne 0) { break }
-              Start-Sleep -Seconds 1
-            }
-            Write-Output "::notice title=Windows window probe::Running executable HWND=$($process.MainWindowHandle). This does not cover the file dialogs or backup operations."
-            Start-Sleep -Seconds 3
-            $probe = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/verification/read-native-login.ps1 -WindowHandle ($process.MainWindowHandle.ToInt64()) 2>&1
-            $probeExit = $LASTEXITCODE
-            if ($probeExit -ne 0) {
-              $detail = (($probe | ForEach-Object { $_.ToString() }) -join ' ').Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error title=Windows accessibility probe::$detail"
-              exit $probeExit
-            }
-            $probe | Write-Output
-          } finally {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-          }
-
       - name: Exercise export and restore in the real Windows GUI
         shell: powershell
+        env:
+          PASSWORDSAVER_TEST_TOTP: ${{ matrix.totp }}
         run: .github/verification/external-backup-uia.ps1
