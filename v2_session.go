@@ -76,6 +76,12 @@ func openActiveV2VaultSession(path string, engine *cryptov2.Engine, masterPasswo
 }
 
 func (s *v2VaultSession) save(vault *Vault) error {
+	return s.saveChecked(vault, nil)
+}
+
+// beforeReplace runs under the file locks immediately before a rename. The
+// second call sees the old primary already copied to the normal backup.
+func (s *v2VaultSession) saveChecked(vault *Vault, beforeReplace func(backupWritten bool) error) error {
 	if s == nil {
 		return ErrVaultSessionClosed
 	}
@@ -127,7 +133,12 @@ func (s *v2VaultSession) save(vault *Vault) error {
 		s.closeLocked()
 		return ErrVaultSessionChanged
 	}
-	if err := writeFileAtomic(s.path+".bak", current); err != nil {
+	var beforeBackup, beforePrimary func() error
+	if beforeReplace != nil {
+		beforeBackup = func() error { return beforeReplace(false) }
+		beforePrimary = func() error { return beforeReplace(true) }
+	}
+	if err := writeFileAtomicChecked(s.path+".bak", current, beforeBackup); err != nil {
 		return fmt.Errorf("encrypted v2 backup was not confirmed; active file was not replaced: %w", err)
 	}
 	backup, err := readV2File(s.path + ".bak")
@@ -138,7 +149,7 @@ func (s *v2VaultSession) save(vault *Vault) error {
 		s.closeLocked()
 		return ErrVaultSessionChanged
 	}
-	if err := writeFileAtomic(s.path, container); err != nil {
+	if err := writeFileAtomicChecked(s.path, container, beforePrimary); err != nil {
 		if errors.Is(err, errVaultCommitUncertain) {
 			s.closeLocked()
 			return fmt.Errorf("%w: %v", errVaultCommitUncertain, err)

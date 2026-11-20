@@ -14,6 +14,7 @@
   import StorageDiagnostics from './components/StorageDiagnostics.svelte';
   import SettingsView from './components/SettingsView.svelte';
   import MasterPasswordDialog from './components/MasterPasswordDialog.svelte';
+  import ExternalBackupDialog from './components/ExternalBackupDialog.svelte';
   import { validView, getThemeController, auditPasswords, filterAccounts } from './ui.js';
   import {
     Login, LoginV2, CreateV2Vault, GetVaultStatus, GetStorageLocationStatus, OpenStorageFolder, OpenLegacyStorageFolder,
@@ -55,6 +56,8 @@
   let passwordChangeBusy = false;
   let passwordChangeError = '';
   let exportBusy = false;
+  let externalBackupMode = null;
+  let externalImportWriting = false;
   let externalRestoreOpen = false;
   let externalRestoreBusy = false;
   let externalRestoreFileName = '';
@@ -221,7 +224,7 @@
     activationPassword = ''; activationTotp = ''; activationToken = ''; migrationBusy = false; migrationError = '';
     closeStorageMigrationModal();
     closeMasterPasswordChange();
-    closeExternalRestore(); exportBusy = false;
+    closeExternalRestore(); exportBusy = false; externalBackupMode = null; externalImportWriting = false;
     recoveryBusy = false; confirmNewVault = false; setupMasterPassword = ''; setupConfirmPassword = '';
     cancelEdit(); searchQuery = ''; breachedCount = 0; activeFilter = 'Все';
     if (reason) lockReason = reason;
@@ -278,9 +281,12 @@
   });
 
   function showBackendLock() {
-    const message = passwordChangeBusy
-      ? 'Сессия закрыта во время смены пароля. Сначала попробуйте войти с новым паролем.'
-      : 'Хранилище заблокировано по тайм-ауту';
+    let message = 'Хранилище заблокировано по тайм-ауту';
+    if (passwordChangeBusy) {
+      message = 'Сессия закрыта во время смены пароля. Сначала попробуйте войти с новым паролем.';
+    } else if (externalImportWriting) {
+      message = 'Сессия закрыта. Проверьте записи после входа перед повтором импорта.';
+    }
     clearSensitiveState(message);
   }
 
@@ -328,6 +334,17 @@
       if (sessionGeneration.isCurrent(generation)) toastMessage = friendlyBackendError(error);
     } finally {
       if (sessionGeneration.isCurrent(generation)) exportBusy = false;
+    }
+  }
+
+  function externalImportCompleted(event) {
+    externalBackupMode = null;
+    externalImportWriting = false;
+    const count = event.detail;
+    toastMessage = count ? `Импортировано записей: ${count}.` : 'Совпадающие записи пропущены. Хранилище не изменилось.';
+    if (count) {
+      loadAccounts();
+      refreshVaultStatus();
     }
   }
 
@@ -997,7 +1014,8 @@
         <StorageStatusBar storage={storageStatus} on:click={() => handleLogout('Хранилище заблокировано')}/>
       </div>
     {:else if activeView === 'vaults'}
-      <StorageView storage={storageStatus} vault={vaultStatus} {exportBusy} on:click={() => openVaultFolder(false)} on:export={exportEncryptedBackup}>
+      <StorageView storage={storageStatus} vault={vaultStatus} {exportBusy} on:click={() => openVaultFolder(false)} on:export={exportEncryptedBackup}
+        on:checkCopy={event => externalBackupMode = event.detail ? 'import' : 'verify'}>
         {#if vaultStatus.state === 'v1-active' || vaultStatus.state === 'v1-prepared'}
           <div class="button-row"><button class="primary-button" disabled={migrationBusy || (vaultStatus.state === 'v1-prepared' && !vaultStatus.v2ContainerPresent)} on:click={openMigrationModal}>Подготовить переход на v2</button>{#if vaultStatus.state === 'v1-prepared'}<button class="secondary-button" disabled={migrationBusy} on:click={beginCancelV2Preparation}>Отменить подготовку v2</button>{/if}</div>
         {/if}
@@ -1018,6 +1036,11 @@
 {#if passwordChangeOpen && isLoggedIn}
   <MasterPasswordDialog busy={passwordChangeBusy} error={passwordChangeError} {totpEnabled}
     on:changePassword={event => submitMasterPasswordChange(event.detail)} on:close={closeMasterPasswordChange}/>
+{/if}
+{#if externalBackupMode && isLoggedIn}
+  <ExternalBackupDialog forImport={externalBackupMode === 'import'} on:close={() => externalBackupMode = null}
+    on:complete={externalImportCompleted} on:writing={event => externalImportWriting = event.detail}
+    on:locked={event => clearSensitiveState('Сессия закрыта. ' + event.detail)}/>
 {/if}
 {#if externalRestoreOpen && !isLoggedIn}
   <Modal title="Восстановить из внешней копии v2" busy={externalRestoreBusy} on:close={closeExternalRestore}>

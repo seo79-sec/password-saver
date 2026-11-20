@@ -1,5 +1,67 @@
 export namespace main {
 
+	export class ExternalImportSelection {
+	    token: string;
+	    fileName: string;
+
+	    static createFrom(source: any = {}) { return new ExternalImportSelection(source); }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.token = source["token"];
+	        this.fileName = source["fileName"];
+	    }
+	}
+
+	export class ExternalImportRow {
+	    index: number;
+	    title: string;
+	    login: string;
+	    conflict: boolean;
+
+	    static createFrom(source: any = {}) { return new ExternalImportRow(source); }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.title = source["title"];
+	        this.login = source["login"];
+	        this.conflict = source["conflict"];
+	    }
+	}
+
+	export class ExternalImportReview {
+	    token: string;
+	    fileName: string;
+	    accountCount: number;
+	    totpEnabled: boolean;
+	    records: Array<ExternalImportRow>;
+
+	    static createFrom(source: any = {}) { return new ExternalImportReview(source); }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.token = source["token"];
+	        this.fileName = source["fileName"];
+	        this.accountCount = source["accountCount"];
+	        this.totpEnabled = source["totpEnabled"];
+	        this.records = source["records"]?.map(ExternalImportRow.createFrom);
+	    }
+	}
+
+	export class ExternalImportChoice {
+	    index: number;
+	    separate: boolean;
+
+	    static createFrom(source: any = {}) { return new ExternalImportChoice(source); }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.separate = source["separate"];
+	    }
+	}
+
 	export class ExternalRestorePreview {
 	    token: string;
 	    fileName: string;

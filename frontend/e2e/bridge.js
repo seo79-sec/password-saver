@@ -40,6 +40,31 @@ export async function installBridge(page, options = {}) {
       }),
       ConfirmExternalV2Restore: async () => { state.locked = true; state.pending = false; },
       CancelExternalV2Restore: async () => {},
+      SelectExternalV2Import: async forImport => {
+        state.importMode = forImport;
+        if (options.delayImportSelection) return later('resolveImportSelection');
+        return options.cancelImportPicker ? {} : { token: 'synthetic-selection', fileName: 'backup.v2.enc' };
+      },
+      CheckSelectedExternalV2Backup: async () => {
+        if (options.delayImportReview) return later('resolveImportReview');
+        return {
+          token: state.importMode ? 'synthetic-import-review' : '',
+          fileName: 'backup.v2.enc', accountCount: 2, totpEnabled: true,
+          records: state.importMode ? [
+            { index: 0, title: 'GitHub|||Работа', login: 'developer@example.com', conflict: true },
+            { index: 1, title: 'Synthetic other service', login: 'source@example.test', conflict: false },
+          ] : null,
+        };
+      },
+      ConfirmExternalV2Import: async (_token, choices) => {
+        if (options.delayImportConfirm) return later('resolveImportConfirm');
+        const separate = choices.some(choice => choice.index === 0 && choice.separate);
+        const other = choices.some(choice => choice.index === 1);
+        if (separate) state.accounts.push({ id: 'synthetic-imported-0', title: 'GitHub|||Работа', login: 'developer@example.com', password: 'synthetic-duplicate' });
+        if (other) state.accounts.push({ id: 'synthetic-imported-1', title: 'Synthetic other service', login: 'source@example.test', password: 'synthetic-new-copy-value' });
+        return Number(separate) + Number(other);
+      },
+      CancelExternalV2Import: async () => {},
       GetAccounts:async()=>{if(state.locked || state.pending)throw Error('locked');if(options.delayAccounts)return later('resolveAccounts');return copy(state.accounts);},
       AddAccount:async(title,login,password)=>{state.accounts.push({id:String(Date.now()),title,login,password,updatedAt:Date.now()/1000});},
       UpdateAccount:async(id,title,login,password)=>{state.accounts=state.accounts.map(a=>a.id===id?{...a,title,login,password}:a);},

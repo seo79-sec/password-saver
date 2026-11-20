@@ -311,33 +311,40 @@ func ensurePathAbsent(path string) error {
 }
 
 func readV2File(path string) ([]byte, error) {
+	data, _, err := readV2FileSnapshot(path)
+	return data, err
+}
+
+// The returned identity comes from the handle used to read the bytes, not
+// from a later lookup of the path (notably on Windows).
+func readV2FileSnapshot(path string) ([]byte, os.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > cryptov2.MaxContainerSize {
-		return nil, ErrVaultV2Corrupt
+		return nil, nil, ErrVaultV2Corrupt
 	}
 	if reparse, err := storagePathIsReparsePoint(path); err != nil || reparse {
-		return nil, ErrVaultStorageUnsafe
+		return nil, nil, ErrVaultStorageUnsafe
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil || !os.SameFile(info, openedInfo) || !openedInfo.Mode().IsRegular() {
-		return nil, ErrVaultStorageUnsafe
+		return nil, nil, ErrVaultStorageUnsafe
 	}
 	data, err := io.ReadAll(io.LimitReader(file, cryptov2.MaxContainerSize+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(data) > cryptov2.MaxContainerSize {
-		return nil, ErrVaultV2Corrupt
+		return nil, nil, ErrVaultV2Corrupt
 	}
-	return data, nil
+	return data, openedInfo, nil
 }
 
 func writeFileAtomicNoReplace(path string, data []byte) error {
