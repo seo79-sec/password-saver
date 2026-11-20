@@ -143,16 +143,19 @@ jobs:
         run: |
           $version = (Get-Content -LiteralPath 'wails.json' -Raw | ConvertFrom-Json).info.productVersion
           $frontendVersion = (Get-Content -LiteralPath 'frontend/package.json' -Raw | ConvertFrom-Json).version
-          $binaryVersion = (Get-Item -LiteralPath 'build/bin/password-saver.exe').VersionInfo.ProductVersion
+          $exe = (Get-Item -LiteralPath 'build/bin/password-saver.exe').FullName
+          $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          $fileVersion = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+          $productVersion = '{0}.{1}.{2}.{3}' -f $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart
+          Write-Output "::notice title=Windows versions::Wails $version. Frontend $frontendVersion. EXE file $fileVersion. EXE product $productVersion."
           if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $frontendVersion -cne $version -or
-              $binaryVersion -cnotin @($version, "$version.0")) {
+              $fileVersion -cne "$version.0" -or $productVersion -cne "$version.0") {
             throw 'Wails, frontend and Windows executable versions do not match'
           }
           if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'Checkout does not match the triggering commit' }
           $artifactName = "PasswordSaver-Standard-$version-Windows-x64"
           $root = [IO.Directory]::CreateTempSubdirectory('passwordsaver-candidate-').FullName
           $zipPath = Join-Path $root "$artifactName.zip"
-          $exe = (Get-Item -LiteralPath 'build/bin/password-saver.exe').FullName
           $readme = Join-Path $root 'README.txt'
           $checksums = Join-Path $root 'SHA256SUMS.txt'
           $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
