@@ -1,0 +1,57 @@
+name: Verify recovery keys in Windows EXE
+
+on:
+  push:
+    branches: [test/windows-recovery-key-native]
+    paths:
+      - .github/verification/recovery-key-uia.ps1
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        totp: [enabled, disabled]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for Windows build and artifact verification
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch 44791235720 --repo "${{ github.repository }}" --interval 15 --exit-status
+
+      - name: Get the verified recovery branch EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: PasswordSaver-2.5-Preview-Windows-x64
+          github-token: ${{ github.token }}
+          run-id: 44791235720
+          path: ${{ runner.temp }}/pinned-windows-artifact
+
+      - name: Verify EXE provenance
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'pinned-windows-artifact'
+          Expand-Archive -LiteralPath (Join-Path $root 'PasswordSaver-2.5-Preview-Windows-x64.zip') -DestinationPath $root
+          $package = Join-Path $root 'PasswordSaver'
+          $commit = '68e74e84f5fb32e80c3af7b9840239744c2f6cb4'
+          $readme = Get-Content -LiteralPath (Join-Path $package 'README.txt') -Raw
+          if ($readme -notmatch "(?m)^Commit: $commit\r?$") { throw 'Unexpected artifact commit' }
+          $exe = Join-Path $package 'password-saver.exe'
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = (Get-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Raw).TrimEnd()
+          if ($checksum -cne "$hash  password-saver.exe") { throw 'Downloaded EXE checksum mismatch' }
+          "PASSWORDSAVER_TEST_EXE=$exe" >> $env:GITHUB_ENV
+          Write-Output "::notice title=Verified Windows EXE::Commit $commit, SHA-256 $hash, source run 44791235720."
+
+      - name: Exercise the recovery key lifecycle in the real Windows GUI
+        shell: powershell
+        env:
+          PASSWORDSAVER_TEST_TOTP: ${{ matrix.totp }}
+        run: .github/verification/recovery-key-uia.ps1
