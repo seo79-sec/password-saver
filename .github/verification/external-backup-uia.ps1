@@ -132,7 +132,7 @@ function Native-Pick($title, $action, $path, $submitName) {
   }
   if (-not ($result -match 'Native file dialog')) { throw 'No native file dialog was observed' }
   if ($action -eq 'cancel') { Note 'Observed the native dialog close after cancellation.' }
-  if ($result -match 'Native overwrite prompt acknowledged') { Note 'Acknowledged the native Windows overwrite prompt through UI Automation.' }
+  if ($result -match 'Native overwrite prompt acknowledged') { Note 'Acknowledged the native Windows overwrite prompt.' }
 }
 
 function Digest($path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
@@ -279,6 +279,7 @@ function Test-BackupProfile($withTOTP) {
     See 'Зашифрованная копия сохранена и проверена.'
     $copyHash = Digest $copy
     if ($copyHash -cne $before[$primaryName]) { throw 'Export differs from the encrypted primary' }
+    Note "${description}: selected a path in native Save As and verified the exported file equals the active encrypted primary."
 
     $script:stage = "$description / refuse overwrite"
     Set-Content -LiteralPath $existing -Value 'Synthetic sentinel' -Encoding ascii

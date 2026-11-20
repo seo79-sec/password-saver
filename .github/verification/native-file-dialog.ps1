@@ -195,11 +195,37 @@ if (!$setPath) {
 
 if ($Action -eq 'overwrite') {
   $confirm = Find-Window {
-    param($w) $null -ne (Find-Button $w '6' 'Yes')
-  } 5
+    param($w, $handle)
+    return ($null -ne (Find-Button $w '6' 'Yes')) -or
+      ([PWSTestWindows]::GetDlgItem($handle, 6) -ne [IntPtr]::Zero) -or
+      ([PWSTestWindows]::Title($handle) -match '^Confirm Save')
+  } 7
   if ($null -ne $confirm) {
-    Invoke-Button (Find-Button $confirm '6' 'Yes')
-    Write-Output 'Native overwrite prompt acknowledged via UI Automation'
+    $yes = Find-Button $confirm '6' 'Yes'
+    if ($null -ne $yes) {
+      Invoke-Button $yes
+    } else {
+      $confirmationHandle = [IntPtr] $confirm.Current.NativeWindowHandle
+      $nativeYes = [PWSTestWindows]::GetDlgItem($confirmationHandle, 6)
+      if ($nativeYes -ne [IntPtr]::Zero) {
+        if (![PWSTestWindows]::Click($nativeYes)) { throw 'Native overwrite confirmation rejected Yes' }
+      } else {
+        $null = [PWSTestWindows]::SetForegroundWindow($confirmationHandle)
+        if ([PWSTestWindows]::GetForegroundWindow() -ne $confirmationHandle) {
+          throw 'Native overwrite confirmation is not the foreground window'
+        }
+        [Windows.Forms.SendKeys]::SendWait('%y')
+      }
+    }
+    Write-Output 'Native overwrite prompt acknowledged'
+  } else {
+    $stillOpen = Find-Window { param($w, $h) $h -eq $dialogHandle } 1
+    if ($stillOpen) {
+      $windows = @([PWSTestWindows]::ForPid($AppProcessId) | ForEach-Object {
+        [PWSTestWindows]::Class($_) + ':' + [PWSTestWindows]::Title($_)
+      }) -join ', '
+      throw "Native file dialog stayed open without an identified overwrite prompt. Visible owned windows: $windows"
+    }
   }
 }
 Write-Output 'Native file dialog and path confirmed via UI Automation'
