@@ -89,3 +89,11 @@ export function SelectLegacyStorageDirectory():Promise<main.LegacyStorageSelecti
 export function PrepareSelectedStorageLocationMigration(arg1:string,arg2:string,arg3:string):Promise<string>;
 
 export function CancelLegacyStorageSelection(arg1:string):Promise<void>;
+
+export function SelectExternalV2Import(arg1:boolean):Promise<main.ExternalImportSelection>;
+
+export function CheckSelectedExternalV2Backup(arg1:string,arg2:string,arg3:string):Promise<main.ExternalImportReview>;
+
+export function ConfirmExternalV2Import(arg1:string,arg2:Array<main.ExternalImportChoice>):Promise<number>;
+
+export function CancelExternalV2Import(arg1:string):Promise<void>;

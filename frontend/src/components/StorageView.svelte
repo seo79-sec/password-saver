@@ -15,6 +15,8 @@
     <button class="secondary-button" disabled={exportBusy} on:click={() => dispatch('export')}>
       {exportBusy ? 'Сохранение копии…' : 'Экспортировать зашифрованную копию'}
     </button>
+    <button class="secondary-button" disabled={exportBusy} on:click={() => dispatch('checkCopy', false)}>Проверить целостность копии</button>
+    <button class="secondary-button" disabled={exportBusy} on:click={() => dispatch('checkCopy', true)}>Импортировать записи из копии</button>
     <p class="muted">Копия открывается мастер-паролем, действовавшим при экспорте. Храните её отдельно и удаляйте устаревшие копии самостоятельно.</p>
   {/if}
 </section>

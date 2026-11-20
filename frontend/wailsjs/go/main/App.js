@@ -177,3 +177,19 @@ export function PrepareSelectedStorageLocationMigration(arg1, arg2, arg3) {
 export function CancelLegacyStorageSelection(arg1) {
   return window['go']['main']['App']['CancelLegacyStorageSelection'](arg1);
 }
+
+export function SelectExternalV2Import(arg1) {
+  return window['go']['main']['App']['SelectExternalV2Import'](arg1);
+}
+
+export function CheckSelectedExternalV2Backup(arg1, arg2, arg3) {
+  return window['go']['main']['App']['CheckSelectedExternalV2Backup'](arg1, arg2, arg3);
+}
+
+export function ConfirmExternalV2Import(arg1, arg2) {
+  return window['go']['main']['App']['ConfirmExternalV2Import'](arg1, arg2);
+}
+
+export function CancelExternalV2Import(arg1) {
+  return window['go']['main']['App']['CancelExternalV2Import'](arg1);
+}
