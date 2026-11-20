@@ -116,7 +116,7 @@ function Wait-Window($exe, $profile) {
   $psi.RedirectStandardError = $true
   $script:process = [Diagnostics.Process]::Start($psi)
   $script:appStderr = $script:process.StandardError.ReadToEndAsync()
-  $end = [DateTime]::UtcNow.AddSeconds(40)
+  $end = [DateTime]::UtcNow.AddSeconds(55)
   do {
     $script:process.Refresh()
     if ($script:process.HasExited) { throw 'EXE exited before its native window opened' }

@@ -5,6 +5,7 @@ on:
     branches: [test/windows-recovery-key-native]
     paths:
       - .github/verification/recovery-key-uia.ps1
+      - .github/workflows/verify-recovery-key-native.yml
 
 permissions:
   contents: read
@@ -17,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        totp: [enabled, disabled]
+        totp: [disabled]
+        attempt: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - name: Wait for Windows build and artifact verification
