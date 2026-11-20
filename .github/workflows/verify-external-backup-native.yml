@@ -1,0 +1,64 @@
+name: Verify external backup in Windows EXE
+
+on:
+  push:
+    branches: [test/windows-external-backup-native]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get the verified main EXE
+        uses: actions/download-artifact@v4
+        with:
+          name: PasswordSaver-2.5-Preview-Windows-x64
+          github-token: ${{ github.token }}
+          run-id: 44656038019
+          path: ${{ runner.temp }}/pinned-windows-artifact
+
+      - name: Verify EXE provenance
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'pinned-windows-artifact'
+          Expand-Archive -LiteralPath (Join-Path $root 'PasswordSaver-2.5-Preview-Windows-x64.zip') -DestinationPath $root
+          $package = Join-Path $root 'PasswordSaver'
+          $commit = 'febf1780635946c9a759c0f52d5da330eb18f276'
+          $readme = Get-Content -LiteralPath (Join-Path $package 'README.txt') -Raw
+          if ($readme -notmatch "(?m)^Commit: $commit\r?$") { throw 'Unexpected artifact commit' }
+          $exe = Join-Path $package 'password-saver.exe'
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = (Get-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Raw).TrimEnd()
+          if ($checksum -cne "$hash  password-saver.exe") { throw 'Downloaded EXE checksum mismatch' }
+          "PASSWORDSAVER_TEST_EXE=$exe" >> $env:GITHUB_ENV
+          Write-Output "::notice title=Verified Windows EXE::Commit $commit, SHA-256 $hash, source run 44656038019."
+
+      - name: Probe the hosted Windows desktop
+        shell: pwsh
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $interactive = [Environment]::UserInteractive
+          Write-Output "::notice title=Windows desktop probe::Session=$session; UserInteractive=$interactive"
+          $testRoot = Join-Path $env:RUNNER_TEMP 'passwordsaver-native-desktop-probe'
+          $env:LOCALAPPDATA = Join-Path $testRoot 'Local'
+          $env:APPDATA = Join-Path $testRoot 'Roaming'
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $testRoot 'WebView2'
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA, $env:APPDATA, $env:WEBVIEW2_USER_DATA_FOLDER -Force | Out-Null
+          $process = Start-Process -FilePath $env:PASSWORDSAVER_TEST_EXE -WorkingDirectory $testRoot -PassThru
+          try {
+            for ($i = 0; $i -lt 20; $i++) {
+              $process.Refresh()
+              if ($process.HasExited) { throw "EXE exited before desktop probe, code $($process.ExitCode)" }
+              if ($process.MainWindowHandle -ne 0) { break }
+              Start-Sleep -Seconds 1
+            }
+            Write-Output "::notice title=Windows window probe::Running executable HWND=$($process.MainWindowHandle). This does not cover the file dialogs or backup operations."
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
