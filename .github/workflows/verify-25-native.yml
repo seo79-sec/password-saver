@@ -12,8 +12,8 @@ permissions:
   actions: read
 
 env:
-  PRODUCT_COMMIT: e28c57ccfa54758c3b97c674393679c2c0a23496
-  PRODUCT_RUN: 44798195313
+  PRODUCT_COMMIT: 87901c2a9aa7fe5dc00b84de288aaa66af1e92e3
+  PRODUCT_RUN: 44799122938
   PRODUCT_ARTIFACT: PasswordSaver-Standard-2.5.0-Windows-x64
 
 jobs:
