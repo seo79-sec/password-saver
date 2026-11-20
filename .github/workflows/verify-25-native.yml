@@ -1,0 +1,73 @@
+name: Verify PasswordSaver 2.5 Windows GUI
+
+on:
+  push:
+    branches: [test/windows-2.5.0-native]
+    paths:
+      - .github/workflows/verify-25-native.yml
+      - .github/verification/**
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PRODUCT_COMMIT: 7392979ba8325c4a10b11ebcaeba40b22cd91e70
+  PRODUCT_RUN: 44795556039
+  PRODUCT_ARTIFACT: PasswordSaver-2.5-Preview-Windows-x64
+
+jobs:
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { scenario: import, totp: enabled, script: external-backup-uia.ps1 }
+          - { scenario: import, totp: disabled, script: external-backup-uia.ps1 }
+          - { scenario: restore, totp: enabled, script: external-backup-uia.ps1 }
+          - { scenario: legacy-v1, totp: disabled, script: legacy-regression-uia.ps1 }
+          - { scenario: legacy-v2, totp: enabled, script: legacy-regression-uia.ps1 }
+          - { scenario: recovery-key, totp: enabled, script: recovery-key-uia.ps1 }
+          - { scenario: recovery-key, totp: disabled, script: recovery-key-uia.ps1 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the pinned Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PRODUCT_ARTIFACT }}
+          github-token: ${{ github.token }}
+          run-id: ${{ env.PRODUCT_RUN }}
+          path: ${{ runner.temp }}/pinned-windows-artifact
+
+      - name: Verify EXE and ZIP provenance
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'pinned-windows-artifact'
+          $zip = Join-Path $root "$env:PRODUCT_ARTIFACT.zip"
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $outerChecksum = $zip + '.sha256'
+          if (Test-Path -LiteralPath $outerChecksum) {
+            if ((Get-Content -LiteralPath $outerChecksum -Raw).TrimEnd() -cne "$zipHash  $env:PRODUCT_ARTIFACT.zip") {
+              throw 'Downloaded ZIP checksum mismatch'
+            }
+          }
+          Expand-Archive -LiteralPath $zip -DestinationPath $root
+          $package = Join-Path $root 'PasswordSaver'
+          $readme = Get-Content -LiteralPath (Join-Path $package 'README.txt') -Raw
+          if ($readme -notmatch "(?m)^Commit: $env:PRODUCT_COMMIT\r?$") { throw 'Unexpected artifact commit' }
+          $exe = Join-Path $package 'password-saver.exe'
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = (Get-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Raw).TrimEnd()
+          if ($checksum -cne "$hash  password-saver.exe") { throw 'Downloaded EXE checksum mismatch' }
+          "PASSWORDSAVER_TEST_EXE=$exe" >> $env:GITHUB_ENV
+          Write-Output "::notice title=Verified Windows EXE::Commit $env:PRODUCT_COMMIT. ZIP SHA-256 $zipHash. EXE SHA-256 $hash."
+
+      - name: Exercise the actual Windows window
+        shell: powershell
+        env:
+          PASSWORDSAVER_TEST_TOTP: ${{ matrix.totp }}
+          PASSWORDSAVER_TEST_SCENARIO: ${{ matrix.scenario }}
+        run: .github/verification/${{ matrix.script }}
