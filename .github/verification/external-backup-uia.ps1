@@ -237,11 +237,29 @@ function Enable-TOTP {
     if ($item.Current.Name -cmatch $alphabet) { $base32 = $item.Current.Name; break }
   }
   if (!$base32) { throw 'Synthetic authenticator value was absent in the setup dialog' }
-  $script:stage = 'TOTP on / initialize the authenticator in GUI'
-  Type-Value 'Код подтверждения' (Test-TOTP $base32) -keyboard
+  $script:stage += ' / initialize TOTP from the visible setup secret'
+  $code = Test-TOTP $base32
+  Type-Value 'Код подтверждения' $code
+  $field = Control 'Код подтверждения' 'Edit'
+  $text = $field.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+  if ($text -cne $code) {
+    Type-Value 'Код подтверждения' $code -keyboard
+    $field = Control 'Код подтверждения' 'Edit'
+    if ($field.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -cne $code) {
+      throw 'The native TOTP control did not receive the input'
+    }
+  }
   Click 'Включить TOTP'
-  See 'Двухфакторная аутентификация успешно включена!'
-  $script:stage = 'TOTP on / dismiss the enabled confirmation'
+  try {
+    See 'Двухфакторная аутентификация успешно включена!'
+  } catch {
+    $safe = @('Неверный код подтверждения', 'Неверный код двухфакторной аутентификации',
+      'Операция не выполнена', 'Хранилище заблокировано', 'Настройка TOTP')
+    $visible = @($safe | Where-Object { $null -ne (Find-Control $_ '' -partial) })
+    Note ('Visible TOTP outcome during provisioning: ' + ($visible -join ', '))
+    throw
+  }
+  $script:stage += ' / dismiss the enabled confirmation'
   Click 'Понятно'
   $null = Control 'Хранилища' 'Button'
   return $base32
