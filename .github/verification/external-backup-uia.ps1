@@ -131,6 +131,7 @@ function Native-Pick($title, $action, $path, $submitName) {
     throw
   }
   if (-not ($result -match 'Native file dialog')) { throw 'No native file dialog was observed' }
+  if ($action -eq 'cancel') { Note 'Observed the native dialog close after cancellation.' }
   if ($result -match 'Native overwrite prompt acknowledged') { Note 'Acknowledged the native Windows overwrite prompt through UI Automation.' }
 }
 

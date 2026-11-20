@@ -7,7 +7,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
 
 # Native shell dialogs can be owned HWNDs without appearing as immediate
 # children in the desktop's UI Automation tree. Enumerate the app windows
@@ -22,6 +22,8 @@ public static class PWSTestWindows {
     private delegate bool Enumerator(IntPtr h, IntPtr arg);
     [DllImport("user32.dll")] private static extern bool EnumWindows(Enumerator callback, IntPtr arg);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint code);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
@@ -144,7 +146,11 @@ if ($Action -eq 'cancel') {
   return
 }
 
-$edit = Wait-Value {
+# The common item dialog's File name edit can be represented by different
+# accessibility providers. Prefer the real control's ValuePattern when
+# available. Otherwise use the Windows File name shortcut in this HWND.
+$setPath = $false
+try {
   $nameControl = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1148'
   $edit = $null
   if ($null -ne $nameControl -and $nameControl.Current.ControlType -eq [Windows.Automation.ControlType]::Edit) {
@@ -152,20 +158,39 @@ $edit = Wait-Value {
   } elseif ($null -ne $nameControl) {
     $edit = Find-Control $nameControl ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit)
   }
-  if ($null -eq $edit) {
-    $edit = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1001'
+  if ($null -ne $edit) {
+    $value = $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+    $value.SetValue($FilePath)
+    $setPath = $value.Current.Value -ceq $FilePath
   }
-  $edit
-}
-if ($null -eq $edit) { throw 'Native file-name field was not found' }
-$value = $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-$value.SetValue($FilePath)
-if ($value.Current.Value -cne $FilePath) { throw 'File-name field did not retain the chosen path' }
-$submit = Wait-Value { Find-Button $window '1' $buttonName }
-if ($null -ne $submit) { Invoke-Button $submit }
-else {
-  $nativeSubmit = [PWSTestWindows]::GetDlgItem($dialogHandle, 1)
-  if ($nativeSubmit -eq 0 -or ![PWSTestWindows]::Click($nativeSubmit)) { throw 'Expected native dialog submit button was not found' }
+} catch [InvalidOperationException] { }
+
+if (!$setPath) {
+  $null = [PWSTestWindows]::SetForegroundWindow($dialogHandle)
+  Start-Sleep -Milliseconds 200
+  if ([PWSTestWindows]::GetForegroundWindow() -ne $dialogHandle) {
+    throw 'Native file dialog is not the foreground window'
+  }
+  [Windows.Forms.SendKeys]::SendWait('%n')
+  [Windows.Forms.SendKeys]::SendWait('^a')
+  # This is a disposable synthetic path. Credentials never use this clipboard.
+  [Windows.Forms.Clipboard]::SetText($FilePath)
+  try {
+    [Windows.Forms.SendKeys]::SendWait('^v')
+    Start-Sleep -Milliseconds 200
+    [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  } finally {
+    [Windows.Forms.Clipboard]::Clear()
+  }
+} else {
+  $submit = Wait-Value { Find-Button $window '1' $buttonName }
+  if ($null -ne $submit) { Invoke-Button $submit }
+  else {
+    $nativeSubmit = [PWSTestWindows]::GetDlgItem($dialogHandle, 1)
+    if ($nativeSubmit -eq 0 -or ![PWSTestWindows]::Click($nativeSubmit)) {
+      throw 'Expected native dialog submit button was not found'
+    }
+  }
 }
 
 if ($Action -eq 'overwrite') {
