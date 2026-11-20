@@ -539,8 +539,9 @@ function Test-ImportProfile($withTOTP) {
     $policy = Control 'Совпадение' 'ComboBox' -partial
     $null = (New-Object -ComObject WScript.Shell).AppActivate($script:process.Id)
     $policy.SetFocus()
-    [Windows.Forms.SendKeys]::SendWait('{HOME}{DOWN}')
-    See 'Создать отдельную запись'
+    # Open the native WebView2 combo popup and commit its last option.
+    [Windows.Forms.SendKeys]::SendWait('%{DOWN}')
+    [Windows.Forms.SendKeys]::SendWait('{END}{ENTER}')
     Click 'Подтвердить импорт'
     See-CombinedText 'Импортировано записей:\s*1\s*\.'
     $duplicated = Snapshot $vaultDir

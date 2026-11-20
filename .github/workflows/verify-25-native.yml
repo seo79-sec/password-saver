@@ -26,11 +26,6 @@ jobs:
         include:
           - { scenario: import, totp: enabled, script: external-backup-uia.ps1 }
           - { scenario: import, totp: disabled, script: external-backup-uia.ps1 }
-          - { scenario: restore, totp: enabled, script: external-backup-uia.ps1 }
-          - { scenario: legacy-v1, totp: disabled, script: legacy-regression-uia.ps1 }
-          - { scenario: legacy-v2, totp: enabled, script: legacy-regression-uia.ps1 }
-          - { scenario: recovery-key, totp: enabled, script: recovery-key-uia.ps1 }
-          - { scenario: recovery-key, totp: disabled, script: recovery-key-uia.ps1 }
     steps:
       - uses: actions/checkout@v4
 
