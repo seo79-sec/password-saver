@@ -57,6 +57,26 @@ function Control($name, $type, [switch]$partial) {
 }
 
 function See($text) { $null = Control $text '' -partial }
+# WebView2 exposes static text and Svelte interpolation as separate UIA
+# text fragments, even when they appear on a single line to the user.
+function See-CombinedText($pattern) {
+  $condition = [Windows.Automation.PropertyCondition]::new(
+    [Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [Windows.Automation.ControlType]::Text)
+  $until = [DateTime]::UtcNow.AddSeconds(8)
+  do {
+    $strings = @(
+      foreach ($element in $script:window.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
+        try { if (!$element.Current.IsOffscreen) { [string] $element.Current.Name } }
+        catch [Windows.Automation.ElementNotAvailableException] { }
+      }
+    )
+    if (($strings -join ' ') -match $pattern) { return }
+    Start-Sleep -Milliseconds 150
+  } while ([DateTime]::UtcNow -lt $until)
+  throw "Missing preview text matching '$pattern'"
+}
+
 function Absent($text, $type) {
   if ($null -ne (Find-Control $text $type -partial)) { throw "Unexpected GUI control '$text'" }
 }
@@ -229,8 +249,8 @@ function Preview($copy, $password, $totpSecret, $before, $vaultDir, $totpText) {
   $code = if ($totpSecret) { Test-TOTP $totpSecret } else { '' }
   Check-RestoreSource $copy $password $code
   See 'Проверенная копия:'
-  See 'Записей: 1'
-  See $totpText
+  See-CombinedText 'Записей:\s*1\s*\.'
+  See-CombinedText $totpText
   Absent 'Мастер-пароль копии' 'Edit'
   Equal-Disk $before (Snapshot $vaultDir)
 }
@@ -322,7 +342,7 @@ function Test-BackupProfile($withTOTP) {
     Note "${description}: observed native Open cancellation and rejection of invalid credentials. Vault file digests stayed unchanged."
 
     $script:stage = "$description / preview then cancel"
-    $totpText = if ($withTOTP) { 'TOTP: включён' } else { 'TOTP: выключен' }
+    $totpText = if ($withTOTP) { 'TOTP:\s*включён' } else { 'TOTP:\s*выключен' }
     Preview $copy $password $totpSecret $before $vaultDir $totpText
     Click 'Не восстанавливать'
     See 'Только у вас.'
