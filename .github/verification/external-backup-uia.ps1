@@ -37,7 +37,7 @@ function Find-Control($name, $type, [switch]$partial) {
   }
   foreach ($control in $script:window.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
     try {
-      if (!$partial -or $control.Current.Name.Contains($name)) { return $control }
+      if (!$partial -or ([string]$control.Current.Name).Contains($name)) { return $control }
     } catch [Windows.Automation.ElementNotAvailableException] { }
   }
   return $null
