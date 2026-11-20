@@ -68,9 +68,9 @@ jobs:
               Start-Sleep -Seconds 1
             }
             Write-Output "::notice title=Windows window probe::Running executable HWND=$($process.MainWindowHandle). This does not cover the file dialogs or backup operations."
+            Start-Sleep -Seconds 3
+            pwsh -NoProfile -File .github/verification/read-native-login.ps1 -WindowHandle ($process.MainWindowHandle.ToInt64())
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
-
-      - name: Exercise the real app and native file dialogs
-        run: node frontend/e2e/windows-external-backup-real.mjs
