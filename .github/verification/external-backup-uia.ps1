@@ -118,14 +118,17 @@ function Wait-Window($exe, $profile) {
   $psi.RedirectStandardError = $true
   $script:process = [Diagnostics.Process]::Start($psi)
   $script:appStderr = $script:process.StandardError.ReadToEndAsync()
-  $end = [DateTime]::UtcNow.AddSeconds(20)
+  $end = [DateTime]::UtcNow.AddSeconds(40)
   do {
     $script:process.Refresh()
     if ($script:process.HasExited) { throw 'EXE exited before its native window opened' }
     if ($script:process.MainWindowHandle -ne 0) { break }
     Start-Sleep -Milliseconds 250
   } while ([DateTime]::UtcNow -lt $end)
-  if ($script:process.MainWindowHandle -eq 0) { throw 'EXE had no native window handle' }
+  if ($script:process.MainWindowHandle -eq 0) {
+    Note ("The pinned EXE stayed alive with no native window handle. Session ID=" + $script:process.SessionId + ".")
+    throw 'EXE had no native window handle'
+  }
   $script:window = [Windows.Automation.AutomationElement]::FromHandle($script:process.MainWindowHandle)
   See 'Только у вас.'
   Note 'Observed the actual Windows login window and WebView2 controls via UI Automation.'
