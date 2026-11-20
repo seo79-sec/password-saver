@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main, "feature/**"]
   pull_request:
@@ -57,7 +58,10 @@ jobs:
   windows:
     runs-on: windows-latest
     outputs:
-      preview-zip-sha256: ${{ steps.package-preview.outputs.zip-sha256 }}
+      artifact-name: ${{ steps.package-candidate.outputs.artifact-name }}
+      product-version: ${{ steps.package-candidate.outputs.product-version }}
+      zip-sha256: ${{ steps.package-candidate.outputs.zip-sha256 }}
+      exe-sha256: ${{ steps.package-candidate.outputs.exe-sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -104,7 +108,7 @@ jobs:
       - name: Build Windows desktop application
         run: wails build -platform windows/amd64
 
-      - name: Check Windows preview executable
+      - name: Check Windows executable
         shell: pwsh
         run: |
           $exe = Get-Item -LiteralPath 'build/bin/password-saver.exe' -ErrorAction Stop
@@ -133,12 +137,20 @@ jobs:
             }
           }
 
-      - name: Package and verify Windows preview ZIP
-        id: package-preview
+      - name: Package and verify Windows candidate ZIP
+        id: package-candidate
         shell: pwsh
         run: |
-          $artifactName = 'PasswordSaver-2.5-Preview-Windows-x64'
-          $root = [IO.Directory]::CreateTempSubdirectory('passwordsaver-preview-').FullName
+          $version = (Get-Content -LiteralPath 'wails.json' -Raw | ConvertFrom-Json).info.productVersion
+          $frontendVersion = (Get-Content -LiteralPath 'frontend/package.json' -Raw | ConvertFrom-Json).version
+          $binaryVersion = (Get-Item -LiteralPath 'build/bin/password-saver.exe').VersionInfo.ProductVersion
+          if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $frontendVersion -cne $version -or
+              $binaryVersion -cnotin @($version, "$version.0")) {
+            throw 'Wails, frontend and Windows executable versions do not match'
+          }
+          if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'Checkout does not match the triggering commit' }
+          $artifactName = "PasswordSaver-Standard-$version-Windows-x64"
+          $root = [IO.Directory]::CreateTempSubdirectory('passwordsaver-candidate-').FullName
           $zipPath = Join-Path $root "$artifactName.zip"
           $exe = (Get-Item -LiteralPath 'build/bin/password-saver.exe').FullName
           $readme = Join-Path $root 'README.txt'
@@ -147,10 +159,9 @@ jobs:
           $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
 
           @"
-          PasswordSaver 2.5 Preview (Windows x64)
+          PasswordSaver Standard $version (Windows x64)
 
-          This is a test build from the commit below, not an official release.
-          Use only synthetic data in a dedicated Windows test profile.
+          Use only synthetic data in a dedicated Windows profile when testing this build.
 
           1. Extract the ZIP to a new folder.
           2. Open the PasswordSaver folder and run password-saver.exe.
@@ -163,6 +174,7 @@ jobs:
               Get-FileHash -Algorithm SHA256 .\password-saver.exe
 
           Commit: $env:GITHUB_SHA
+          Source: $env:GITHUB_REF
           Run: $runUrl (attempt $env:GITHUB_RUN_ATTEMPT)
           "@ | Set-Content -LiteralPath $readme -Encoding utf8
           "$hash  password-saver.exe" | Set-Content -LiteralPath $checksums -Encoding ascii
@@ -186,7 +198,7 @@ jobs:
           try {
             $names = @($zip.Entries.FullName)
             if ($names.Count -ne $files.Count -or (Compare-Object @($files.Keys) $names -CaseSensitive)) {
-              throw 'Preview ZIP does not match the exact file allowlist'
+              throw 'Candidate ZIP does not match the exact file allowlist'
             }
           } finally {
             $zip.Dispose()
@@ -197,29 +209,36 @@ jobs:
           $extractedHash = (Get-FileHash -LiteralPath (Join-Path $extracted 'PasswordSaver/password-saver.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksumLine = (Get-Content -LiteralPath (Join-Path $extracted 'PasswordSaver/SHA256SUMS.txt') -Raw).TrimEnd()
           if ($extractedHash -ne $hash -or $checksumLine -cne "$extractedHash  password-saver.exe") {
-            throw 'Preview ZIP executable checksum mismatch'
+            throw 'Candidate ZIP executable checksum mismatch'
           }
 
           $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = "$zipPath.sha256"
+          [IO.File]::WriteAllText($manifest, "$zipHash  $artifactName.zip`n", [Text.Encoding]::ASCII)
+          "artifact-name=$artifactName" >> $env:GITHUB_OUTPUT
+          "product-version=$version" >> $env:GITHUB_OUTPUT
           "zip-path=$zipPath" >> $env:GITHUB_OUTPUT
+          "manifest-path=$manifest" >> $env:GITHUB_OUTPUT
           "zip-sha256=$zipHash" >> $env:GITHUB_OUTPUT
+          "exe-sha256=$hash" >> $env:GITHUB_OUTPUT
           @"
-          ### Windows x64 preview
+          ### Windows x64 release candidate
 
-          After **Upload Windows preview artifact** succeeds, sign in to GitHub and open
-          the [run summary]($runUrl). Under **Artifacts**, download **$artifactName**.
-          Extract the downloaded artifact, then extract **$artifactName.zip**.
-          Open **PasswordSaver/README.txt** and run **PasswordSaver/password-saver.exe**.
+          Sign in to GitHub and download **$artifactName** under **Artifacts** in the
+          [run summary]($runUrl). Extract the outer download. Verify **$artifactName.zip**
+          against **$artifactName.zip.sha256**, then unpack and open **PasswordSaver/README.txt**.
           Use a dedicated Windows test profile with synthetic data.
 
-          Commit: $env:GITHUB_SHA · Run: $env:GITHUB_RUN_ID · Attempt: $env:GITHUB_RUN_ATTEMPT
+          Commit: $env:GITHUB_SHA · Source: $env:GITHUB_REF · Attempt: $env:GITHUB_RUN_ATTEMPT
           "@ >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Upload Windows preview artifact
+      - name: Upload Windows candidate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PasswordSaver-2.5-Preview-Windows-x64
-          path: ${{ steps.package-preview.outputs.zip-path }}
+          name: ${{ steps.package-candidate.outputs.artifact-name }}
+          path: |
+            ${{ steps.package-candidate.outputs.zip-path }}
+            ${{ steps.package-candidate.outputs.manifest-path }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -228,13 +247,19 @@ jobs:
     needs: windows
     runs-on: ubuntu-latest
     steps:
-      - name: Download the uploaded Windows preview
+      - uses: actions/checkout@v4
+
+      - name: Download the uploaded Windows candidate
         uses: actions/download-artifact@v4
         with:
-          name: PasswordSaver-2.5-Preview-Windows-x64
+          name: ${{ needs.windows.outputs.artifact-name }}
+          path: downloaded-candidate
 
-      - name: Verify downloaded ZIP matches the validated package
+      - name: Verify downloaded ZIP, EXE and provenance independently
         env:
-          PREVIEW_ZIP_SHA256: ${{ needs.windows.outputs.preview-zip-sha256 }}
-        run: |
-          printf '%s  %s\n' "$PREVIEW_ZIP_SHA256" 'PasswordSaver-2.5-Preview-Windows-x64.zip' | sha256sum --check --strict
+          ARTIFACT_DIRECTORY: downloaded-candidate
+          ARTIFACT_NAME: ${{ needs.windows.outputs.artifact-name }}
+          PRODUCT_VERSION: ${{ needs.windows.outputs.product-version }}
+          EXPECTED_ZIP_SHA256: ${{ needs.windows.outputs.zip-sha256 }}
+          EXPECTED_EXE_SHA256: ${{ needs.windows.outputs.exe-sha256 }}
+        run: python3 .github/scripts/verify_windows_candidate.py

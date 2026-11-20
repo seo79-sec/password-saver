@@ -139,17 +139,17 @@ CI добавляет браузерные проверки к полным Go/r
 
 ## Ручная проверка Windows перед одобрением
 
-В успешном [запуске CI для PR #13](https://github.com/seo79-sec/password-saver/pull/13/checks)
-откройте **Summary** и скачайте **PasswordSaver-2.5-Preview-Windows-x64** в разделе
+В успешном [запуске CI на main](https://github.com/seo79-sec/password-saver/actions?query=branch%3Amain)
+откройте **Summary** и скачайте **PasswordSaver-Standard-2.5.0-Windows-x64** в разделе
 **Artifacts**. Войдите в GitHub для скачивания. Артефакт хранится 14 дней.
-Распакуйте скачанный файл, затем вложенный `PasswordSaver-2.5-Preview-Windows-x64.zip`.
+Распакуйте скачанный файл, затем вложенный `PasswordSaver-Standard-2.5.0-Windows-x64.zip`.
 В папке `PasswordSaver` находятся `password-saver.exe`, `README.txt` с номером
 сборки и `SHA256SUMS.txt`. Если WebView2 Runtime отсутствует, установите Microsoft
 Edge WebView2 Evergreen Runtime по ссылке в README. Для запуска достаточно EXE
 и WebView2. Проверяйте сборку в отдельном профиле Windows на синтетических данных.
 
-Windows GUI в облачной Linux-среде не запускался. На изолированном профиле с
-синтетическими данными нужно проверить:
+Приёмку финального интерфейса проводите в отдельном профиле Windows с
+синтетическими данными. Сверьте [план испытаний](WINDOWS_MANUAL_TEST.md) и проверьте:
 
 1. Запуск Windows EXE/WebView2 в пяти размерах, DPI 100/125/150/200%, Segoe UI,
    системные темы Windows и их изменение без перезапуска.

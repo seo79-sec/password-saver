@@ -1,49 +1,66 @@
-# Preparing a PasswordSaver Standard 2.0.0 Windows release
+# Подготовка выпуска PasswordSaver Standard 2.5.0 для Windows
 
-This project builds the Windows x64 Standard executable. Release candidate preparation does not publish a GitHub Release. A separate manual workflow creates a **draft release** with verified archive checksums; public publication remains a separate, human-approved action.
+## Кандидат из проверенного коммита
 
-## Build the candidate
+CI собирает Windows x64 ZIP из SHA, указанного в запуске, и публикует его на
+14 дней в **Actions → CI → Run summary → Artifacts**. Для повторной сборки
+доступен **Actions → Build Windows release candidate → Run workflow** с
+выбором `main`. Оба пути выполняют один workflow. В нём есть Linux-тесты Go
+и race detector, vet, frontend-тесты, Playwright, Windows-тесты Go, сборка
+Wails и запуск EXE в изолированном профиле. Запуск процесса подтверждает
+старт. Приёмка окна Wails/WebView2 и системных диалогов записывается отдельно.
 
-The repository contains `.github/workflows/release-candidate.yml`. After that workflow has landed on `main`, open **Actions → Build Windows release candidate → Run workflow**, select the reviewed `main` commit, and run it. The workflow runs the Go tests/build, frontend tests/build, and Wails Windows build, then uploads `password-saver-standard-v2.0.0-windows-amd64` as a short-lived Actions artifact. It builds Standard only; there is no GOST Lab build. It does not create a tag or release.
+Для выпуска используйте прогон на точном проверенном коммите **после merge**
+в `main`. Проверьте SHA и строку `Source: refs/heads/main` в README внутри
+ZIP. Кандидаты из веток и PR подходят для проверки изменений.
+Кандидат из `main` берётся из его собственного успешного прогона.
 
-For a local Windows build, install Go 1.26.4+, Node.js 24, Wails CLI v2.12.0, and the Windows build tools/WebView2 prerequisites listed in the README. From the repository root:
+## Скачать и проверить
 
-```powershell
-go test ./...
-go test -race ./...
-go build ./...
-Push-Location frontend
-npm ci
-npm test
-npm run build
-Pop-Location
-wails build -platform windows/amd64 -clean
-```
+1. Войдите в GitHub и скачайте артефакт
+   `PasswordSaver-Standard-2.5.0-Windows-x64`.
+2. Распакуйте внешнюю загрузку Actions. В ней находятся
+   `PasswordSaver-Standard-2.5.0-Windows-x64.zip` и одноимённый
+   файл с окончанием `.zip.sha256`.
+3. Сверьте ZIP и извлечённый EXE. Независимый Linux job в CI скачивает
+   опубликованный артефакт, проверяет оба SHA-256 по результату Windows
+   сборки и сверяет точный список файлов. Оба хеша есть в Summary прогона
+   и в аннотации задания проверки.
 
-The executable is `build\bin\password-saver.exe`. Calculate its SHA-256 and distribute that checksum beside the executable:
+   ```powershell
+   $archive = 'PasswordSaver-Standard-2.5.0-Windows-x64.zip'
+   $zipHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+   if ((Get-Content -LiteralPath ($archive + '.sha256') -Raw).TrimEnd() -cne "$zipHash  $archive") {
+     throw 'ZIP SHA-256 mismatch'
+   }
+   $output = Join-Path ([IO.Path]::GetTempPath()) ('passwordsaver-verify-' + [Guid]::NewGuid())
+   Expand-Archive -LiteralPath $archive -DestinationPath $output
+   $exe = Join-Path $output 'PasswordSaver/password-saver.exe'
+   $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+   $manifest = Join-Path $output 'PasswordSaver/SHA256SUMS.txt'
+   if ((Get-Content -LiteralPath $manifest -Raw).TrimEnd() -cne "$exeHash  password-saver.exe") {
+     throw 'EXE SHA-256 mismatch'
+   }
+   ```
 
-```powershell
-$hash = (Get-FileHash .\build\bin\password-saver.exe -Algorithm SHA256).Hash.ToLower()
-"$hash  password-saver.exe" | Set-Content .\build\bin\password-saver.exe.sha256 -NoNewline
-```
+Внутри ZIP допустимы ровно `PasswordSaver/password-saver.exe`,
+`PasswordSaver/README.txt` и `PasswordSaver/SHA256SUMS.txt`. Хранилища,
+ключи восстановления, тестовые данные, резервные и диагностические
+копии остаются вне архива. Для запуска распакованного EXE требуется
+Microsoft Edge WebView2 Runtime.
 
-## Manual release gate
+## Финальное решение и публикация
 
-Before making a release public:
+1. Сверьте зелёный CI и хеши с коммитом `main`. Пройдите и зафиксируйте
+   [план приёмки Windows](WINDOWS_MANUAL_TEST.md) на этом же EXE. Просмотрите
+   [описание выпуска](RELEASE_NOTES_V2.5.0.md) и [изменения](../CHANGELOG.md).
+2. После отдельного решения о выпуске создайте тег `v2.5.0` именно на
+   проверенном SHA `main`. На странице **GitHub Releases → Draft a new release**
+   выберите этот тег и приложите проверенные ZIP и `.zip.sha256` из того же
+   прогона. Вставьте release notes. Сверьте SHA-256 после скачивания из черновика
+   и опубликуйте его после финального подтверждения.
+3. Существующие тег и релиз `v2.0.0` сохраняются. Workflow и заметки версии
+   2.0.0 относятся к прежнему выпуску.
 
-1. Confirm all required GitHub Actions checks are green on the exact `main` commit being released, including Windows Wails build.
-2. Complete and record [`WINDOWS_MANUAL_TEST.md`](WINDOWS_MANUAL_TEST.md) on a Windows 10/11 x64 machine using disposable test data only. Verify v1 recovery and explicit v2 backup recovery before approving release.
-3. Review the [2.0.0 changelog](../CHANGELOG.md), `wails.json` product version, Standard edition metadata, binary checksum, and packaged startup on a clean machine with WebView2 Runtime.
-4. Ensure no `vault_data.enc`, `.bak`, diagnostic archive, or test secret is included with release assets.
-
-## Create the release draft and publish after approval
-
-1. Merge the reviewed release packaging PR into `main` after all required checks pass on its commit.
-2. In **Actions → Publish PasswordSaver Standard 2.0.0 draft → Run workflow**, select `main`. The workflow runs Go/frontend tests, Windows Wails build, checks the archive and SHA-256 values, creates a tag `v2.0.0` at exactly the workflow commit, and creates a **draft release** (not public).
-3. Verify that the draft includes `PasswordSaver-Standard-2.0.0-Windows-x64.zip` and `.zip.sha256`. Download and independently verify both the ZIP hash and the inner `password-saver.exe.sha256`.
-4. Run and document the final Windows manual test plan against this exact binary. Review `docs/RELEASE_NOTES_V2.0.0.md` and the SHA-256 checksums.
-5. Only after approval, press **Publish release** on the draft in GitHub. Do not edit or replace assets without a new security review.
-
-Do not run the draft workflow on a feature branch, force-move tags, or publish a release before verifying the binary.
-
-Do not commit or upload a real vault or any user data. Re-check the artifact contents before attaching files.
+Сборка кандидата работает с правами чтения и создаёт только Actions artifact.
+Подготовка версии 2.5.0 не создаёт тег или GitHub Release.

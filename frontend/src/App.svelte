@@ -1,4 +1,5 @@
 <script>
+  import { version } from '../package.json';
   import { onMount } from 'svelte';
   import AppShell from './components/AppShell.svelte';
   import Icon from './components/Icon.svelte';
@@ -1168,4 +1169,4 @@
     <div class="dialog-buttons"><button class="secondary-button" on:click={close2FASetup}>Отмена</button><button class="primary-button" on:click={handleConfirm2FA}>Включить TOTP</button></div>
   </Modal>
 {/if}
-{#if showAbout}<Modal title="О PasswordSaver" on:close={() => showAbout = false}><p>PasswordSaver Standard — локальный менеджер паролей.</p><p class="muted">Разработано студентами МТУСИ: Дрейман Артём, Лосев Илья, Егоров Семен.</p><p class="muted">Интерфейс 2.5. Редакция Standard использует AES-256-GCM и Argon2id. Подключение устройств планируется в 3.0.</p></Modal>{/if}
+{#if showAbout}<Modal title="О PasswordSaver" on:close={() => showAbout = false}><p>PasswordSaver Standard — локальный менеджер паролей.</p><p class="muted">Разработано студентами МТУСИ: Дрейман Артём, Лосев Илья, Егоров Семен.</p><p class="muted">Версия {version}. Редакция Standard использует AES-256-GCM и Argon2id.</p></Modal>{/if}
