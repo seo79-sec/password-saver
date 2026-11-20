@@ -316,10 +316,26 @@ function Test-V1Migration($exe, $base, $vaultDir) {
   Note 'Observed separate v2 activation and login after restart with the migrated entry. Both legacy files were retained.'
 }
 
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PasswordSaverGuiMouse {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
+}
+'@
+
 function Open-RecordActions {
+  $null = (New-Object -ComObject WScript.Shell).AppActivate($script:process.Id)
   $menu = Control 'Действия с записью' ''
-  $menu.SetFocus()
-  [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+  $bounds = $menu.Current.BoundingRectangle
+  if ($bounds.IsEmpty -or $menu.Current.IsOffscreen) { throw 'Record actions element has no visible bounds' }
+  $x = [int]($bounds.Left + $bounds.Width / 2)
+  $y = [int]($bounds.Top + $bounds.Height / 2)
+  if (![PasswordSaverGuiMouse]::SetCursorPos($x, $y)) { throw 'Could not move cursor to record actions' }
+  [PasswordSaverGuiMouse]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+  [PasswordSaverGuiMouse]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Test-EditAndDelete {
@@ -371,14 +387,19 @@ function Test-V2Password($exe, $base, $vaultDir) {
   $script:stage = 'original v2 / authenticate old format, add records and TOTP'
   Wait-Window $exe $base
   Login-Consent $password
-  $script:stage = 'original v2 / create, edit, cancel delete and confirm delete'
-  Test-EditAndDelete
+  if ($env:PASSWORDSAVER_TEST_SCENARIO -eq 'records') {
+    $script:stage = 'original v2 / create, edit, cancel delete and confirm delete'
+    Test-EditAndDelete
+    Close-App
+    Note 'Observed creation, editing, delete cancellation and confirmed deletion in the actual Windows window.'
+    return
+  }
   Add-Record $oldTitle
   Add-Record $laterTitle
   $secret = Enable-TOTP
   Click 'Заблокировать'
   Login-TestVault $password $secret -AllowLater
-  Note 'Observed login of the original v2 fixture, creation, editing, cancellation and confirmed deletion, manual lock and TOTP login.'
+  Note 'Observed login of the original v2 fixture, record creation, manual lock and TOTP login.'
 
   $script:stage = 'original v2 / idle lock closes password dialog'
   Test-IdleWithModal $password $secret
