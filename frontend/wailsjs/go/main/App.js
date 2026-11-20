@@ -22,6 +22,10 @@ export function CancelVaultReset(arg1) {
   return window['go']['main']['App']['CancelVaultReset'](arg1);
 }
 
+export function CancelExternalV2Restore(arg1) {
+  return window['go']['main']['App']['CancelExternalV2Restore'](arg1);
+}
+
 export function ChangeMasterPassword(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ChangeMasterPassword'](arg1, arg2, arg3, arg4);
 }
@@ -50,8 +54,16 @@ export function ConfirmVaultRecovery(arg1) {
   return window['go']['main']['App']['ConfirmVaultRecovery'](arg1);
 }
 
+export function ConfirmExternalV2Restore(arg1) {
+  return window['go']['main']['App']['ConfirmExternalV2Restore'](arg1);
+}
+
 export function DeleteAccount(arg1) {
   return window['go']['main']['App']['DeleteAccount'](arg1);
+}
+
+export function ExportEncryptedV2Backup() {
+  return window['go']['main']['App']['ExportEncryptedV2Backup']();
 }
 
 export function Generate2FA() {
@@ -112,6 +124,14 @@ export function PrepareV2Migration(arg1, arg2) {
 
 export function PrepareV2VaultRecovery(arg1) {
   return window['go']['main']['App']['PrepareV2VaultRecovery'](arg1);
+}
+
+export function PrepareExternalV2Restore(arg1, arg2) {
+  return window['go']['main']['App']['PrepareExternalV2Restore'](arg1, arg2);
+}
+
+export function SelectExternalV2Backup() {
+  return window['go']['main']['App']['SelectExternalV2Backup']();
 }
 
 export function ConfirmV2VaultRecovery(arg1) {

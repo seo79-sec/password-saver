@@ -106,6 +106,12 @@ export function hasStorageBackup(status) {
 
 export function friendlyBackendError(error) {
   const message = String(error?.message ?? error ?? '').toLowerCase();
+  if (/выбранная копия уже совпадает/.test(message)) return 'Эта копия уже совпадает с основным хранилищем.';
+  if (/target file already exists|уже существует|file exists/.test(message)) return 'Файл уже существует. Выберите новое имя; существующая копия не перезаписывается.';
+  if (/результат восстановления не подтверждён/.test(message)) return 'Результат восстановления не подтверждён. Проверьте основной файл и резервную копию перед повторной попыткой.';
+  if (/unsupported vault format|unsupported.*algorithm/.test(message)) return 'Формат или алгоритм выбранной копии не поддерживается. Файлы хранилища не изменены.';
+  if (/выберите файл вне папки/.test(message)) return 'Выберите файл вне папки активного хранилища.';
+  if (/выбранная копия изменилась|хранилище изменилось|confirmation.*expired|подтверждение.*истекло/.test(message)) return 'Файлы изменились или подтверждение истекло. Выберите копию и повторите проверку.';
   if (/authentication failed|incorrect .*master password|wrong.*password|неверный мастер-пароль/.test(message)) {
     return 'Мастер-пароль неверен или данные хранилища повреждены.';
   }

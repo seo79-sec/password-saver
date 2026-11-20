@@ -112,6 +112,27 @@ jobs:
             throw 'Wails did not produce a nonempty password-saver.exe'
           }
 
+      - name: Launch Windows executable with isolated test data
+        shell: pwsh
+        run: |
+          $exe = (Get-Item -LiteralPath 'build/bin/password-saver.exe' -ErrorAction Stop).FullName
+          $testData = Join-Path $env:RUNNER_TEMP 'passwordsaver-exe-smoke'
+          New-Item -ItemType Directory -Path $testData -Force | Out-Null
+          $env:LOCALAPPDATA = $testData
+          $process = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 8
+            $process.Refresh()
+            if ($process.HasExited) {
+              throw "Windows executable exited during startup (code $($process.ExitCode))"
+            }
+            Write-Output 'Windows executable stayed running for 8 seconds with isolated test data.'
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
       - name: Package and verify Windows preview ZIP
         id: package-preview
         shell: pwsh
@@ -128,7 +149,7 @@ jobs:
           @"
           PasswordSaver 2.5 Preview (Windows x64)
 
-          This is a test build for PR #13, not an official release.
+          This is a test build from the commit below, not an official release.
           Use only synthetic data in a dedicated Windows test profile.
 
           1. Extract the ZIP to a new folder.
@@ -141,7 +162,6 @@ jobs:
           and compare the hash with SHA256SUMS.txt:
               Get-FileHash -Algorithm SHA256 .\password-saver.exe
 
-          PR: https://github.com/seo79-sec/password-saver/pull/13
           Commit: $env:GITHUB_SHA
           Run: $runUrl (attempt $env:GITHUB_RUN_ATTEMPT)
           "@ | Set-Content -LiteralPath $readme -Encoding utf8
