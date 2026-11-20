@@ -34,6 +34,7 @@ type App struct {
 	pendingV2Recover           v2RecoveryChallenge
 	pendingExternalRestore     externalRestoreChallenge
 	pendingExternalImport      externalImportChallenge
+	pendingRecoveryKey         recoveryKeyResetChallenge
 	selectedExternalBackup     string
 	backupDialogGeneration     uint64
 	backupDialogOpen           bool
@@ -716,6 +717,7 @@ func (a *App) clearPendingChallengesLocked() {
 	a.clearPendingV2RecoveryLocked()
 	a.clearPendingExternalRestoreLocked()
 	a.clearExternalImportLocked()
+	a.clearRecoveryKeyResetLocked()
 	a.selectedExternalBackup = ""
 	a.backupDialogGeneration++
 	a.backupDialogOpen = false

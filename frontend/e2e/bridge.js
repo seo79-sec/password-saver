@@ -32,6 +32,14 @@ export async function installBridge(page, options = {}) {
         state.locked = true;
         state.pending = false;
       },
+      CreateRecoveryKey: async () => options.delayRecoveryKeyCreate
+        ? later('resolveRecoveryKeyCreate') : 'PSRK1-synthetic-key-not-a-real-secret',
+      VerifyRecoveryKey: async () => {},
+      DisableRecoveryKey: async () => {},
+      PrepareRecoveryKeyReset: async () => options.delayRecoveryKeyReset
+        ? later('resolveRecoveryKeyReset') : 'synthetic-key-confirmation',
+      ConfirmRecoveryKeyReset: async () => { state.locked = true; state.pending = false; },
+      CancelRecoveryKeyReset: async () => {},
       ExportEncryptedV2Backup: async () => options.delayBackupExport ? later('resolveBackupExport') : 'C:\\Synthetic\\backup.v2.enc',
       SelectExternalV2Backup: async () => 'backup.v2.enc',
       PrepareExternalV2Restore: async () => options.delayExternalRestore ? later('resolveExternalRestore') : ({

@@ -19,10 +19,11 @@ import (
 )
 
 const (
-	FormatID      = "passwordsaver-v2"
-	FormatVersion = 2
-	AEADAES256GCM = "aes-256-gcm"
-	KDFArgon2id   = "argon2id"
+	FormatID              = "passwordsaver-v2"
+	FormatVersion         = 2
+	RecoveryFormatVersion = 3
+	AEADAES256GCM         = "aes-256-gcm"
+	KDFArgon2id           = "argon2id"
 
 	SaltSize             = 32
 	DEKSize              = 32
@@ -141,14 +142,15 @@ type KDFMetadata struct {
 // Container is the canonical JSON wire representation. AEAD tags are appended
 // to WrappedDEK and Ciphertext by cipher.AEAD.Seal and stored in those fields.
 type Container struct {
-	Format     string      `json:"format"`
-	Version    uint16      `json:"version"`
-	AEAD       string      `json:"aead"`
-	KDF        KDFMetadata `json:"kdf"`
-	WrapNonce  string      `json:"wrapNonce"`
-	WrappedDEK string      `json:"wrappedDEK"`
-	Nonce      string      `json:"nonce"`
-	Ciphertext string      `json:"ciphertext"`
+	Format     string        `json:"format"`
+	Version    uint16        `json:"version"`
+	AEAD       string        `json:"aead"`
+	KDF        KDFMetadata   `json:"kdf"`
+	WrapNonce  string        `json:"wrapNonce"`
+	WrappedDEK string        `json:"wrappedDEK"`
+	Nonce      string        `json:"nonce"`
+	Ciphertext string        `json:"ciphertext"`
+	Recovery   *RecoverySlot `json:"recovery,omitempty"`
 }
 
 // Options configures an Engine. Random is injectable for deterministic failure
@@ -205,6 +207,10 @@ func NewEngine(options Options, additional ...AEADAlgorithm) (*Engine, error) {
 
 // Encrypt serializes plaintext into a v2 envelope. It never modifies v1 files.
 func (e *Engine) Encrypt(masterPassword string, plaintext []byte) ([]byte, error) {
+	return e.encrypt(masterPassword, plaintext, nil)
+}
+
+func (e *Engine) encrypt(masterPassword string, plaintext, recoveryKey []byte) ([]byte, error) {
 	if e == nil {
 		return nil, ErrInvalidParameters
 	}
@@ -257,6 +263,9 @@ func (e *Engine) Encrypt(masterPassword string, plaintext []byte) ([]byte, error
 			Salt: base64.StdEncoding.EncodeToString(salt),
 		},
 	}
+	if recoveryKey != nil {
+		metadata.Version = RecoveryFormatVersion
+	}
 	wrapAAD := makeWrapAAD(metadata, salt, wrapNonce)
 	wrappedDEK, err := sealAEAD(algorithm, kek, wrapNonce, dek, wrapAAD)
 	if err != nil {
@@ -265,6 +274,13 @@ func (e *Engine) Encrypt(masterPassword string, plaintext []byte) ([]byte, error
 	metadata.WrapNonce = base64.StdEncoding.EncodeToString(wrapNonce)
 	metadata.WrappedDEK = base64.StdEncoding.EncodeToString(wrappedDEK)
 	metadata.Nonce = base64.StdEncoding.EncodeToString(nonce)
+	if recoveryKey != nil {
+		slot, err := e.wrapRecoveryKey(metadata, algorithm, dek, recoveryKey)
+		if err != nil {
+			return nil, err
+		}
+		metadata.Recovery = slot
+	}
 	payloadAAD := makePayloadAAD(metadata, nonce)
 	ciphertext, err := sealAEAD(algorithm, dek, nonce, plaintext, payloadAAD)
 	if err != nil {
@@ -369,70 +385,107 @@ func (e *Engine) openContainer(masterPassword string, serialized []byte) (opened
 	if len(masterPassword) < 12 {
 		return opened, ErrPasswordTooShort
 	}
-	container, err := parseContainer(serialized)
+	validated, err := e.validateContainer(serialized)
 	if err != nil {
 		return opened, err
 	}
-	if container.Format != FormatID || container.Version != FormatVersion {
-		return opened, ErrUnsupportedFormat
-	}
-	if container.KDF.ID != KDFArgon2id || container.KDF.Version != Argon2idVersion {
-		return opened, ErrUnsupportedFormat
-	}
-	kdfConfig := KDFConfig{Time: container.KDF.Time, MemoryKiB: container.KDF.MemoryKiB, Threads: container.KDF.Threads}
-	if err := validateKDFConfig(kdfConfig); err != nil {
-		return opened, err
-	}
-	algorithm := e.algorithms[container.AEAD]
-	if algorithm == nil {
-		return opened, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, container.AEAD)
-	}
-	if algorithm.KeySize() != DEKSize || algorithm.NonceSize() <= 0 || algorithm.TagSize() <= 0 {
-		return opened, ErrInvalidParameters
-	}
-	salt, err := decodeCanonicalBase64(container.KDF.Salt, SaltSize)
-	if err != nil || len(salt) != SaltSize {
-		return opened, ErrInvalidContainer
-	}
-	wrapNonce, err := decodeCanonicalBase64(container.WrapNonce, algorithm.NonceSize())
-	if err != nil || algorithm.ValidateNonce(wrapNonce) != nil {
-		return opened, ErrInvalidContainer
-	}
-	nonce, err := decodeCanonicalBase64(container.Nonce, algorithm.NonceSize())
-	if err != nil || algorithm.ValidateNonce(nonce) != nil {
-		return opened, ErrInvalidContainer
-	}
-	wrappedDEK, err := decodeCanonicalBase64(container.WrappedDEK, DEKSize+algorithm.TagSize())
-	if err != nil || len(wrappedDEK) != DEKSize+algorithm.TagSize() {
-		return opened, ErrInvalidContainer
-	}
-	maxCiphertext := MaxPlaintextSize + algorithm.TagSize()
-	ciphertext, err := decodeCanonicalBase64(container.Ciphertext, maxCiphertext)
-	if err != nil || len(ciphertext) < algorithm.TagSize() || len(ciphertext) > maxCiphertext {
-		return opened, ErrInvalidContainer
-	}
-
 	passwordBytes := []byte(masterPassword)
 	defer wipe(passwordBytes)
-	kek := deriveKEK(passwordBytes, salt, kdfConfig)
+	kek := deriveKEK(passwordBytes, validated.salt, validated.kdf)
 	defer wipe(kek)
-	dek, err := openAEAD(algorithm, kek, wrapNonce, wrappedDEK, makeWrapAAD(container, salt, wrapNonce))
+	dek, err := openAEAD(validated.algorithm, kek, validated.wrapNonce, validated.wrappedDEK,
+		makeWrapAAD(validated.container, validated.salt, validated.wrapNonce))
 	if err != nil || len(dek) != DEKSize {
 		wipe(dek)
 		return opened, ErrAuthentication
 	}
-	plaintext, err := openAEAD(algorithm, dek, nonce, ciphertext, makePayloadAAD(container, nonce))
+	plaintext, err := validated.openPayload(dek)
 	if err != nil {
 		wipe(dek)
+		return opened, err
+	}
+	return openedContainer{container: validated.container, dek: dek, plaintext: plaintext}, nil
+}
+
+type validatedContainer struct {
+	container                                      Container
+	algorithm                                      AEADAlgorithm
+	kdf                                            KDFConfig
+	salt, wrapNonce, wrappedDEK, nonce, ciphertext []byte
+}
+
+// ValidateContainer checks the wire format and resource limits without a secret.
+func (e *Engine) ValidateContainer(serialized []byte) error {
+	_, err := e.validateContainer(serialized)
+	return err
+}
+
+func (e *Engine) validateContainer(serialized []byte) (validatedContainer, error) {
+	if e == nil {
+		return validatedContainer{}, ErrInvalidParameters
+	}
+	container, err := parseContainer(serialized)
+	if err != nil {
+		return validatedContainer{}, err
+	}
+	if container.Format != FormatID ||
+		(container.Version != FormatVersion && container.Version != RecoveryFormatVersion) ||
+		((container.Version == RecoveryFormatVersion) != (container.Recovery != nil)) {
+		return validatedContainer{}, ErrUnsupportedFormat
+	}
+	if container.KDF.ID != KDFArgon2id || container.KDF.Version != Argon2idVersion {
+		return validatedContainer{}, ErrUnsupportedFormat
+	}
+	kdfConfig := KDFConfig{Time: container.KDF.Time, MemoryKiB: container.KDF.MemoryKiB, Threads: container.KDF.Threads}
+	if err := validateKDFConfig(kdfConfig); err != nil {
+		return validatedContainer{}, err
+	}
+	algorithm := e.algorithms[container.AEAD]
+	if algorithm == nil {
+		return validatedContainer{}, fmt.Errorf("%w: %q", ErrUnsupportedAlgorithm, container.AEAD)
+	}
+	if algorithm.KeySize() != DEKSize || algorithm.NonceSize() <= 0 || algorithm.TagSize() <= 0 {
+		return validatedContainer{}, ErrInvalidParameters
+	}
+	salt, err := decodeCanonicalBase64(container.KDF.Salt, SaltSize)
+	if err != nil || len(salt) != SaltSize {
+		return validatedContainer{}, ErrInvalidContainer
+	}
+	wrapNonce, err := decodeCanonicalBase64(container.WrapNonce, algorithm.NonceSize())
+	if err != nil || algorithm.ValidateNonce(wrapNonce) != nil {
+		return validatedContainer{}, ErrInvalidContainer
+	}
+	nonce, err := decodeCanonicalBase64(container.Nonce, algorithm.NonceSize())
+	if err != nil || algorithm.ValidateNonce(nonce) != nil {
+		return validatedContainer{}, ErrInvalidContainer
+	}
+	wrappedDEK, err := decodeCanonicalBase64(container.WrappedDEK, DEKSize+algorithm.TagSize())
+	if err != nil || len(wrappedDEK) != DEKSize+algorithm.TagSize() {
+		return validatedContainer{}, ErrInvalidContainer
+	}
+	maxCiphertext := MaxPlaintextSize + algorithm.TagSize()
+	ciphertext, err := decodeCanonicalBase64(container.Ciphertext, maxCiphertext)
+	if err != nil || len(ciphertext) < algorithm.TagSize() || len(ciphertext) > maxCiphertext {
+		return validatedContainer{}, ErrInvalidContainer
+	}
+
+	if _, _, _, err := recoverySlotFields(container.Recovery, algorithm); err != nil {
+		return validatedContainer{}, err
+	}
+	return validatedContainer{container, algorithm, kdfConfig, salt, wrapNonce, wrappedDEK, nonce, ciphertext}, nil
+}
+
+func (v validatedContainer) openPayload(dek []byte) ([]byte, error) {
+	plaintext, err := openAEAD(v.algorithm, dek, v.nonce, v.ciphertext, makePayloadAAD(v.container, v.nonce))
+	if err != nil {
 		wipe(plaintext)
-		return opened, ErrAuthentication
+		return nil, ErrAuthentication
 	}
 	if len(plaintext) > MaxPlaintextSize {
-		wipe(dek)
 		wipe(plaintext)
-		return opened, ErrInputTooLarge
+		return nil, ErrInputTooLarge
 	}
-	return openedContainer{container: container, dek: dek, plaintext: plaintext}, nil
+	return plaintext, nil
 }
 
 func parseContainer(serialized []byte) (Container, error) {
@@ -547,6 +600,13 @@ func makePayloadAAD(container Container, nonce []byte) []byte {
 	_ = binary.Write(&buffer, binary.BigEndian, container.Version)
 	writeField(&buffer, []byte(container.AEAD))
 	writeField(&buffer, nonce)
+	if slot := container.Recovery; slot != nil {
+		buffer.WriteString("PasswordSaver/v2/RECOVERY-SLOT\x00")
+		_ = binary.Write(&buffer, binary.BigEndian, slot.Version)
+		writeField(&buffer, []byte(slot.Salt))
+		writeField(&buffer, []byte(slot.Nonce))
+		writeField(&buffer, []byte(slot.WrappedDEK))
+	}
 	return buffer.Bytes()
 }
 
