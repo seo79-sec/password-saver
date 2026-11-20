@@ -148,6 +148,17 @@ function Native-Pick($title, $action, $path, $submitName) {
   if ($path) { $params.FilePath = $path }
   try { $result = & "$PSScriptRoot/native-file-dialog.ps1" @params }
   catch {
+    $script:process.Refresh()
+    if ($script:process.HasExited) {
+      $stderr = $script:appStderr.GetAwaiter().GetResult()
+      $signal = if ($stderr -match 'panic:|fatal error:|Exception 0x') { 'Go runtime failure marker present' } else { 'no Go runtime failure marker' }
+      Note ("Native EXE exited unexpectedly during file dialog. Exit code=" + $script:process.ExitCode + ". " + $signal + ".")
+      $safeFrames = @([regex]::Matches($stderr, '(?m)^(github\.com/wailsapp/[-.a-zA-Z0-9/]+\.[-a-zA-Z0-9]+|main\.\(\*App\)\.[a-zA-Z0-9]+)') |
+        Select-Object -First 8 | ForEach-Object { $_.Value })
+      if ($safeFrames) { Note ('Runtime frames (function names only): ' + ($safeFrames -join ', ')) }
+    } else {
+      Note ("Native EXE still runs after the driver lost its window. Main HWND=" + $script:process.MainWindowHandle + ".")
+    }
     $safeMessages = @('Хранилище заблокировано', 'Операция не выполнена',
       'выберите файл вне папки', 'Сохранение копии', 'Экспортировать зашифрованную копию')
     $observed = @($safeMessages | Where-Object { $null -ne (Find-Control $_ '' -partial) })

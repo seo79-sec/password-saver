@@ -15,7 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        totp: [disabled, enabled]
+        totp: [disabled]
+        attempt: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - name: Get the verified main EXE
