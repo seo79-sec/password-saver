@@ -14,16 +14,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install the Windows verification driver
-        working-directory: frontend
-        run: npm ci
-
       - name: Get the verified main EXE
         uses: actions/download-artifact@v4
         with:
@@ -69,8 +59,18 @@ jobs:
             }
             Write-Output "::notice title=Windows window probe::Running executable HWND=$($process.MainWindowHandle). This does not cover the file dialogs or backup operations."
             Start-Sleep -Seconds 3
-            pwsh -NoProfile -File .github/verification/read-native-login.ps1 -WindowHandle ($process.MainWindowHandle.ToInt64())
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $probe = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/verification/read-native-login.ps1 -WindowHandle ($process.MainWindowHandle.ToInt64()) 2>&1
+            $probeExit = $LASTEXITCODE
+            if ($probeExit -ne 0) {
+              $detail = (($probe | ForEach-Object { $_.ToString() }) -join ' ').Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows accessibility probe::$detail"
+              exit $probeExit
+            }
+            $probe | Write-Output
           } finally {
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
+
+      - name: Exercise export and restore in the real Windows GUI
+        shell: powershell
+        run: .github/verification/external-backup-uia.ps1

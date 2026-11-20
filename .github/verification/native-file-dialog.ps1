@@ -53,7 +53,7 @@ if ($null -eq $window) { throw 'Native file dialog not found through Windows UI 
 if ($Action -eq 'cancel') {
   Invoke-Button (Find-Button $window '2' 'Cancel')
   Write-Output 'Native file dialog and Cancel invoked via UI Automation'
-  exit
+  return
 }
 
 $nameControl = Find-Control $window ([Windows.Automation.AutomationElement]::AutomationIdProperty) '1148'

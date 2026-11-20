@@ -1,4 +1,4 @@
-param([long] $WindowHandle)
+﻿param([long] $WindowHandle)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
