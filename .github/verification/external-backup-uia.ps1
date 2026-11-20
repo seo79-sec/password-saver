@@ -412,11 +412,130 @@ function Test-BackupProfile($withTOTP) {
   }
 }
 
+
+function Initialize-ImportProfile($exe, $root, $password) {
+  New-Item -ItemType Directory -Path (Join-Path $root 'Local'), (Join-Path $root 'Roaming') -Force | Out-Null
+  Wait-Window $exe $root
+  $empty = Control 'Создать отдельное пустое хранилище; перенос сейчас не требуется' 'CheckBox' -partial
+  $empty.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+  Type-Value 'Новый мастер-пароль' $password
+  Type-Value 'Повторите мастер-пароль' $password
+  Click 'Создать хранилище v2'
+  $null = Control 'Добавить' 'Button'
+}
+
+function Test-ImportProfile($withTOTP) {
+  $description = if ($withTOTP) { 'TOTP on' } else { 'TOTP off' }
+  $base = Join-Path $env:RUNNER_TEMP ([Guid]::NewGuid().ToString('N'))
+  $sourceRoot = Join-Path $base 'source'
+  $targetRoot = Join-Path $base 'destination'
+  $external = Join-Path $base 'external'
+  $copy = Join-Path $external 'external.v2.enc'
+  $vaultDir = Join-Path $targetRoot 'Local/PasswordSaver/vaults/default'
+  $sourcePassword = [Guid]::NewGuid().ToString('N')
+  $targetPassword = [Guid]::NewGuid().ToString('N')
+  $sourceSecret = $targetSecret = $null
+  $importedTitle = 'Synthetic imported record'
+  $script:stage = "$description import / create isolated source"
+  try {
+    New-Item -ItemType Directory -Path $external -Force | Out-Null
+    $exe = Join-Path $base 'password-saver.exe'
+    Copy-Item -LiteralPath $verifiedExe -Destination $exe
+    if ((Digest $exe) -cne (Digest $verifiedExe)) { throw 'Test EXE differs from the verified artifact' }
+    Initialize-ImportProfile $exe $sourceRoot $sourcePassword
+    Add-Record $oldTitle
+    Add-Record $importedTitle
+    if ($withTOTP) { $sourceSecret = Enable-TOTP }
+    Click 'Хранилища'
+    $script:stage = "$description import / export source using native Save As"
+    Click 'Экспортировать зашифрованную копию'
+    Native-Pick $saveTitle 'select' $copy 'Save'
+    See 'Зашифрованная копия сохранена и проверена.'
+    $copyHash = Digest $copy
+    Close-App
+
+    $script:stage = "$description import / create isolated destination"
+    Initialize-ImportProfile $exe $targetRoot $targetPassword
+    Add-Record $oldTitle
+    if ($withTOTP) { $targetSecret = Enable-TOTP }
+    Click 'Хранилища'
+    $before = Snapshot $vaultDir
+    $script:stage = "$description import / native Open cancel and password rejection"
+    Click 'Проверить целостность копии'
+    Click 'Выбрать файл'
+    Native-Pick $openTitle 'cancel' '' 'Open'
+    Absent 'Мастер-пароль копии' 'Edit'
+    Check-RestoreSource $copy ([Guid]::NewGuid().ToString('N')) ''
+    See 'Не удалось аутентифицировать копию'
+    Absent 'Целостность копии подтверждена' ''
+    Equal-Disk $before (Snapshot $vaultDir)
+
+    if ($withTOTP) {
+      $script:stage = "$description import / reject wrong copy TOTP"
+      $live = @(-60, -30, 0, 30, 60 | ForEach-Object { Test-TOTP $sourceSecret $_ })
+      $wrong = '100000', '200000', '300000', '400000', '500000', '600000' | Where-Object { $_ -notin $live } | Select-Object -First 1
+      Check-RestoreSource $copy $sourcePassword $wrong
+      See 'Неверный код двухфакторной аутентификации.'
+      Equal-Disk $before (Snapshot $vaultDir)
+    }
+    $liveCode = { if ($sourceSecret) { Test-TOTP $sourceSecret } else { '' } }
+    $script:stage = "$description import / authenticated read-only integrity check"
+    Check-RestoreSource $copy $sourcePassword (& $liveCode)
+    See 'Целостность копии подтверждена. Файлы не менялись.'
+    Absent 'Подтвердить импорт' 'Button'
+    Equal-Disk $before (Snapshot $vaultDir)
+    if ((Digest $copy) -cne $copyHash) { throw 'Verification changed the source' }
+    Click 'Готово'
+    Note "${description}: observed the native file picker, cancellation, authentication rejection and read-only verification. Encrypted file digests stayed unchanged."
+
+    $script:stage = "$description import / authenticated preview and cancel"
+    Click 'Импортировать записи из копии'
+    Check-RestoreSource $copy $sourcePassword (& $liveCode)
+    See 'Совпадение'
+    $null = Control $importedTitle 'CheckBox' -partial
+    Click 'Отмена'
+    Equal-Disk $before (Snapshot $vaultDir)
+
+    $script:stage = "$description import / confirm explicit selection and skip matching record"
+    Click 'Импортировать записи из копии'
+    Check-RestoreSource $copy $sourcePassword (& $liveCode)
+    foreach ($title in @($oldTitle, $importedTitle)) {
+      $field = Control $title 'CheckBox' -partial
+      $field.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+    }
+    Click 'Подтвердить импорт'
+    See-CombinedText 'Импортировано записей:\s*1\s*\.'
+    $after = Snapshot $vaultDir
+    if ($after[$selectorName] -cne $before[$selectorName] -or $after[$primaryName] -ceq $before[$primaryName] -or
+        $after[$backupName] -cne $before[$primaryName] -or (Digest $copy) -cne $copyHash) {
+      throw 'Unexpected digest change after selective import'
+    }
+    Click 'Мои пароли'
+    See $oldTitle
+    See $importedTitle
+    Close-App
+    $script:stage = "$description import / restart with original destination credentials"
+    Wait-Window $exe $targetRoot
+    Login-TestVault $targetPassword $targetSecret
+    See $importedTitle
+    Close-App
+    Note "${description}: observed preview cancellation, default duplicate skip and a selected import. After restart, the destination opened with its original credentials and displayed the imported entry."
+  } finally {
+    if ($null -ne $script:process) {
+      if (!$script:process.HasExited) { $script:process.Kill(); $script:process.WaitForExit() }
+      $script:process.Dispose()
+      $script:process = $null
+    }
+    Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 try {
   $session = (Get-Process -Id $PID).SessionId
   if ($session -eq 0 -or ![Environment]::UserInteractive) { throw 'No interactive Windows desktop is available' }
   $mode = $env:PASSWORDSAVER_TEST_TOTP
-  Test-BackupProfile ($mode -eq 'enabled')
+  if ($env:PASSWORDSAVER_TEST_SCENARIO -eq 'import') { Test-ImportProfile ($mode -eq 'enabled') }
+  else { Test-BackupProfile ($mode -eq 'enabled') }
   Note ("Native EXE and file dialogs passed using a disposable LOCALAPPDATA profile with TOTP " + $mode + ".")
 } catch {
   # Errors contain only the current step and type. Never publish an exception

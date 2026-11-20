@@ -1,4 +1,4 @@
-name: Verify external backup in Windows EXE
+name: Verify external backup import in Windows EXE
 
 on:
   push:
@@ -15,16 +15,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        totp: [disabled]
-        attempt: [1, 2]
+        totp: [enabled, disabled]
     steps:
       - uses: actions/checkout@v4
-      - name: Get the verified main EXE
+      - name: Wait for Windows build and artifact verification
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch 44784877548 --repo "${{ github.repository }}" --interval 15 --exit-status
+
+      - name: Get the verified import branch EXE
         uses: actions/download-artifact@v4
         with:
           name: PasswordSaver-2.5-Preview-Windows-x64
           github-token: ${{ github.token }}
-          run-id: 44656038019
+          run-id: 44784877548
           path: ${{ runner.temp }}/pinned-windows-artifact
 
       - name: Verify EXE provenance
@@ -33,7 +38,7 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'pinned-windows-artifact'
           Expand-Archive -LiteralPath (Join-Path $root 'PasswordSaver-2.5-Preview-Windows-x64.zip') -DestinationPath $root
           $package = Join-Path $root 'PasswordSaver'
-          $commit = 'febf1780635946c9a759c0f52d5da330eb18f276'
+          $commit = '9112d614ac6275e8f524754ebd00970504dc6333'
           $readme = Get-Content -LiteralPath (Join-Path $package 'README.txt') -Raw
           if ($readme -notmatch "(?m)^Commit: $commit\r?$") { throw 'Unexpected artifact commit' }
           $exe = Join-Path $package 'password-saver.exe'
@@ -41,10 +46,51 @@ jobs:
           $checksum = (Get-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Raw).TrimEnd()
           if ($checksum -cne "$hash  password-saver.exe") { throw 'Downloaded EXE checksum mismatch' }
           "PASSWORDSAVER_TEST_EXE=$exe" >> $env:GITHUB_ENV
-          Write-Output "::notice title=Verified Windows EXE::Commit $commit, SHA-256 $hash, source run 44656038019."
+          Write-Output "::notice title=Verified Windows EXE::Commit $commit, SHA-256 $hash, source run 44784877548."
 
-      - name: Exercise export and restore in the real Windows GUI
+      - name: Exercise read-only verification and selective import in the real Windows GUI
         shell: powershell
         env:
           PASSWORDSAVER_TEST_TOTP: ${{ matrix.totp }}
+          PASSWORDSAVER_TEST_SCENARIO: import
         run: .github/verification/external-backup-uia.ps1
+
+  open-import-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_BRANCH: feature/v2-external-backup-verify-import
+      HEAD_COMMIT: 9112d614ac6275e8f524754ebd00970504dc6333
+    steps:
+      - name: Open the requested PR if repository policy allows it
+        shell: bash
+        run: |
+          remote_sha="$(gh api "repos/$GH_REPO/git/ref/heads/$HEAD_BRANCH" --jq .object.sha)"
+          test "$remote_sha" = "$HEAD_COMMIT"
+          existing="$(gh pr list --state open --base main --head "$HEAD_BRANCH" --json url --jq '.[0].url // empty')"
+          if [ -n "$existing" ]; then
+            echo "$existing"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/passwordsaver-import-pr.md" <<'EOF'
+          ## Summary
+
+          - Authenticate an external v2 backup from an unlocked vault through the native file picker. Integrity verification is read-only.
+          - Preview titles and logins, select entries, and confirm once. Existing records are never overwritten. Duplicates are skipped unless added as separate records.
+          - Bind confirmation to the verified source and the current vault revision and write one encrypted revision with the existing atomic primary replacement. The destination's password, TOTP and settings stay unchanged.
+          - A failure between writing the encrypted backup and replacing the primary can leave the backup equal to the old primary. If durability is uncertain, re-open the vault and inspect the result before retrying.
+
+          ## Verification
+
+          - Go regression tests cover credentials, TOTP, source changes, expiry, cancel and simulated write failures.
+          - Playwright exercises selection, confirmation and late results after lock with a mocked Wails bridge.
+          - [CI for this head](https://github.com/seo79-sec/password-saver/actions/runs/44784877548) includes the Windows Wails build and an isolated process launch. Native Windows UI verification is run separately against the matching EXE.
+          EOF
+          gh pr create --base main --head "$HEAD_BRANCH" \
+            --title 'PasswordSaver: verify encrypted backups and selectively import records' \
+            --body-file "$RUNNER_TEMP/passwordsaver-import-pr.md"
