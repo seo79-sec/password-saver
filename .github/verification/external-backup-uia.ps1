@@ -91,13 +91,15 @@ function Click($name) {
   $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
 }
 
-function Type-Value($label, $value, [switch]$partial) {
+function Type-Value($label, $value, [switch]$partial, [switch]$keyboard) {
   $field = Control $label 'Edit' -partial:$partial
-  try {
-    $pattern = $field.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-    $pattern.SetValue($value)
-    return
-  } catch [InvalidOperationException] { }
+  if (!$keyboard) {
+    try {
+      $pattern = $field.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+      $pattern.SetValue($value)
+      return
+    } catch [InvalidOperationException] { }
+  }
   # A protected edit may omit ValuePattern. Enter the synthetic values through
   # normal Windows keystrokes in the focused field. No clipboard or logs.
   $null = (New-Object -ComObject WScript.Shell).AppActivate($script:process.Id)
@@ -218,9 +220,13 @@ function Enable-TOTP {
     if ($item.Current.Name -cmatch $alphabet) { $base32 = $item.Current.Name; break }
   }
   if (!$base32) { throw 'Synthetic authenticator value was absent in the setup dialog' }
-  Type-Value 'Код подтверждения' (Test-TOTP $base32)
+  $script:stage = 'TOTP on / initialize the authenticator in GUI'
+  Type-Value 'Код подтверждения' (Test-TOTP $base32) -keyboard
   Click 'Включить TOTP'
+  See 'Двухфакторная аутентификация успешно включена!'
+  $script:stage = 'TOTP on / dismiss the enabled confirmation'
   Click 'Понятно'
+  $null = Control 'Хранилища' 'Button'
   return $base32
 }
 
@@ -372,6 +378,17 @@ function Test-BackupProfile($withTOTP) {
     Login-TestVault $password $totpSecret
     Close-App
     Note "${description}: GUI showed the restored record after new login and EXE restart. The record created after export was absent."
+  } catch {
+    if ($script:stage -like 'TOTP on /*' -and $null -ne $script:window) {
+      $known = @('Хранилища', 'Настройка TOTP', 'Понятно', 'Успешно', 'Операция не выполнена',
+        'Только у вас.', 'Хранилище заблокировано', 'Двухфакторная аутентификация успешно включена')
+      $onScreen = @($known | Where-Object {
+        try { $null -ne (Find-Control $_ '' -partial) }
+        catch { $false }
+      })
+      Note ('Visible TOTP UI labels: ' + ($onScreen -join ', '))
+    }
+    throw
   } finally {
     if ($null -ne $script:process) {
       if (!$script:process.HasExited) { $script:process.Kill(); $script:process.WaitForExit() }
