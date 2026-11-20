@@ -23,7 +23,13 @@ function Note($text) {
 function Find-Control($name, $type, [switch]$partial) {
   $elementType = [Windows.Automation.AutomationElement]
   $condition = if ($type) {
-    [Windows.Automation.PropertyCondition]::new($elementType::ControlTypeProperty, [Windows.Automation.ControlType]::$type)
+    $controlType = switch ($type) {
+      'Button' { [Windows.Automation.ControlType]::Button }
+      'Edit' { [Windows.Automation.ControlType]::Edit }
+      'CheckBox' { [Windows.Automation.ControlType]::CheckBox }
+      default { throw 'Unknown native test control type' }
+    }
+    [Windows.Automation.PropertyCondition]::new($elementType::ControlTypeProperty, $controlType)
   } else { [Windows.Automation.Condition]::TrueCondition }
   if (!$partial) {
     $condition = [Windows.Automation.AndCondition]::new($condition,
@@ -235,13 +241,17 @@ function Test-BackupProfile($withTOTP) {
     $vaultDir = Join-Path $base 'Local/PasswordSaver/vaults/default'
     $script:stage = "$description / start and create"
     Wait-Window $exe $base
+    $script:stage = "$description / toggle setup confirmation"
     $empty = Control 'Создать отдельное пустое хранилище; перенос сейчас не требуется' 'CheckBox' -partial
     $empty.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+    $script:stage = "$description / enter setup password"
     Type-Value 'Новый мастер-пароль' $password
     Type-Value 'Повторите мастер-пароль' $password
+    $script:stage = "$description / verify isolated store and create"
     if (!(Test-Path -LiteralPath $vaultDir -PathType Container)) { throw 'Isolated LOCALAPPDATA was not initialized' }
     Click 'Создать хранилище v2'
     $null = Control 'Добавить' 'Button'
+    $script:stage = "$description / create synthetic record"
     Add-Record $oldTitle
     if ($withTOTP) { $totpSecret = Enable-TOTP }
     Click 'Хранилища'
@@ -350,8 +360,10 @@ try {
 } catch {
   # Errors contain only the current step and type. Never publish an exception
   # from a value/input provider, which might include the synthetic value.
-  Write-Output "::error title=Native backup GUI verification failed::$script:stage. Type=$($_.Exception.GetType().Name)"
-  if ($_.Exception.Message -match '^(Missing|Unexpected GUI|The EXE did not|Synthetic vault files|Expected native dialog|Native file|No native)' ) {
+  $line = $_.InvocationInfo.ScriptLineNumber
+  $kind = $_.FullyQualifiedErrorId.Split(',')[0]
+  Write-Output "::error title=Native backup GUI verification failed::$script:stage. Type=$($_.Exception.GetType().Name), ID=$kind, script line=$line"
+  if ($_.Exception.Message -match '^(Missing|Unexpected GUI|The EXE did not|Synthetic vault files|Expected native dialog|Native file|No native|Isolated LOCALAPPDATA)' ) {
     Write-Output "::notice title=Native GUI driver detail::$($_.Exception.Message)"
   }
   exit 1
