@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +84,19 @@ func checkView(t *testing.T, s *Store, want View) {
 	t.Helper()
 	if got := read(t, s); !reflect.DeepEqual(got, want) {
 		t.Fatal("committed replica contents differ")
+	}
+}
+
+func TestConnectionStringPreservesNativeAbsolutePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "replica space #тест%.sqlite")
+	dsn, err := connectionString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPath, _, ok := strings.Cut(strings.TrimPrefix(dsn, "file:"), "?")
+	got, err := url.PathUnescape(rawPath)
+	if !ok || err != nil || got != filepath.ToSlash(path) {
+		t.Fatalf("SQLite path = %q, expected %q, err=%v", got, filepath.ToSlash(path), err)
 	}
 }
 

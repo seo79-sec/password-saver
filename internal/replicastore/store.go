@@ -125,15 +125,15 @@ func connectionString(path string) (string, error) {
 	if strings.HasPrefix(absolute, "//") {
 		return "", fmt.Errorf("%w: database requires a local path", ErrCorrupt)
 	}
-	if !strings.HasPrefix(absolute, "/") {
-		absolute = "/" + absolute
-	}
 	query := url.Values{
 		"mode":    {"rw"},
 		"_txlock": {"immediate"},
 		"_pragma": {"busy_timeout(250)", "synchronous(FULL)", "temp_store(MEMORY)", "trusted_schema(OFF)", "wal_autocheckpoint(256)"},
 	}
-	return (&url.URL{Scheme: "file", Path: absolute, RawQuery: query.Encode()}).String(), nil
+	// The driver's Go VFS expects a drive path as C:/path, without
+	// the slash an authority-style file URI adds before the volume.
+	escapedPath := (&url.URL{Path: absolute}).EscapedPath()
+	return "file:" + escapedPath + "?" + query.Encode(), nil
 }
 
 func connect(dsn string, key [KeySize]byte) (*Store, error) {
