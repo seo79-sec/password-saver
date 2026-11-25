@@ -106,9 +106,7 @@ func signMembership(h MembershipHeader, controller ed25519.PrivateKey) ([]byte, 
 	return encMode.Marshal(Membership{Header: h, Signature: [64]byte(sig)})
 }
 
-// VerifyMembership checks a signed membership against a previously confirmed
-// controller fingerprint. Pass nil for previous when verifying the initial membership.
-func VerifyMembership(wire, previous []byte, confirmed [32]byte) (Membership, error) {
+func verifySignedMembership(wire []byte, confirmed [32]byte) (Membership, error) {
 	var current Membership
 	if len(wire) > maxMembershipSize {
 		return current, errors.New("membership exceeds size limit")
@@ -134,6 +132,17 @@ func VerifyMembership(wire, previous []byte, confirmed [32]byte) (Membership, er
 	if !ed25519.Verify(h.ControllerPub[:], append([]byte(membershipDomain), encoded...), current.Signature[:]) {
 		return Membership{}, errors.New("invalid membership signature")
 	}
+	return current, nil
+}
+
+// VerifyMembership checks a signed membership against a previously confirmed
+// controller fingerprint. Pass nil for previous when verifying the initial membership.
+func VerifyMembership(wire, previous []byte, confirmed [32]byte) (Membership, error) {
+	current, err := verifySignedMembership(wire, confirmed)
+	if err != nil {
+		return Membership{}, err
+	}
+	h := current.Header
 	if previous == nil {
 		if h.Revision != 1 || h.Epoch != 1 || h.PrevHash != [32]byte{} || len(h.Members) != 1 {
 			return Membership{}, errors.New("invalid initial membership")
