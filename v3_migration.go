@@ -163,8 +163,12 @@ func readV3MigrationRecords(ctx context.Context, session *cryptov2.Session, cand
 	if err := errors.Join(err, store.Close()); err != nil {
 		return nil, err
 	}
-	accounts := make([]Account, 0, len(view.Records))
-	for _, record := range view.Records {
+	return v3AccountsFromRecords(view.Records)
+}
+
+func v3AccountsFromRecords(records []syncmerge.Record) ([]Account, error) {
+	accounts := make([]Account, 0, len(records))
+	for _, record := range records {
 		if len(record.Versions) != 1 {
 			return nil, errV3MigrationConflict
 		}
