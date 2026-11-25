@@ -48,6 +48,23 @@ type DeviceKeys struct {
 	exchange *ecdh.PrivateKey
 }
 
+// PrivateBytes returns copies for encrypted Go profile storage.
+func (k *DeviceKeys) PrivateBytes() (signingSeed, exchangePrivate []byte) {
+	return k.signing.Seed(), k.exchange.Bytes()
+}
+
+// RestoreDeviceKeys reconstructs keys from an authenticated local profile.
+func RestoreDeviceKeys(seed, exchangePrivate []byte) (*DeviceKeys, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, errors.New("invalid device signing seed")
+	}
+	exchange, err := ecdh.X25519().NewPrivateKey(exchangePrivate)
+	if err != nil {
+		return nil, err
+	}
+	return &DeviceKeys{signing: ed25519.NewKeyFromSeed(seed), exchange: exchange}, nil
+}
+
 var (
 	errRequestTooLarge = errors.New("pairing request exceeds size limit")
 	encMode, decMode   = requestModes()

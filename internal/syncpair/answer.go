@@ -41,6 +41,12 @@ type AnswerPayload struct {
 	Checkpoint []byte
 }
 
+// IssuedAnswerMatchesRequest checks the binding in an answer from authenticated local storage.
+func IssuedAnswerMatchesRequest(wire []byte, digest [32]byte) bool {
+	var answer signedAnswer
+	return len(wire) <= maxAnswerSize && decodeAnswer(wire, &answer) == nil && answer.Header.RequestHash == digest
+}
+
 // IssueAnswer adds the requester to the initial membership and encrypts the payload.
 // confirmedRequest must be the fingerprint independently confirmed by the owner.
 func (keys *SpaceKeys) IssueAnswer(initial, requestWire []byte, confirmedRequest [32]byte, payload AnswerPayload, now time.Time) ([]byte, error) {

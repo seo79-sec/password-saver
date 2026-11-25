@@ -49,6 +49,17 @@ type SpaceKeys struct {
 	controller ed25519.PrivateKey
 }
 
+// DeviceSigningKey returns a copy of the owner's key used for changes.
+func (k *SpaceKeys) DeviceSigningKey() ed25519.PrivateKey { return bytes.Clone(k.device.signing) }
+
+// CanonicalBytes returns the complete signed membership file.
+func (m Membership) CanonicalBytes() ([]byte, error) { return encMode.Marshal(m) }
+
+// VerifySignedMembership verifies the signature and pinned fingerprint of a standalone membership.
+func VerifySignedMembership(wire []byte, confirmed [32]byte) (Membership, error) {
+	return verifySignedMembership(wire, confirmed)
+}
+
 // ControllerFingerprint computes SHA-256 over the domain, space ID and controller public key.
 func ControllerFingerprint(spaceID [16]byte, controllerPub [32]byte) [32]byte {
 	input := append([]byte(controllerFingerprintDomain), spaceID[:]...)
