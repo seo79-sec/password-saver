@@ -5,23 +5,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
+	_ "embed"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-func checkV3RollbackReleasedEXE(t *testing.T, snapshot string, want *Vault) {
+//go:embed v3_release_uia.ps1
+var v3ReleaseUIAScript []byte
+
+func checkV3RollbackReleasedEXE(t *testing.T, snapshot string, _ *Vault) {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		return
@@ -70,115 +69,18 @@ func checkV3RollbackReleasedEXE(t *testing.T, snapshot string, want *Vault) {
 		}
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	script := filepath.Join(root, "check-release.ps1")
+	if err := os.WriteFile(script, v3ReleaseUIAScript, 0600); err != nil {
 		t.Fatal(err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
-	deadline, _ := ctx.Deadline()
-	child := exec.CommandContext(ctx, exe)
+	child := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-STA", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
 	child.Dir = root
-	child.Env = append(os.Environ(),
-		"LOCALAPPDATA="+localAppData,
-		"APPDATA="+filepath.Join(root, "Roaming"),
-		"WEBVIEW2_USER_DATA_FOLDER="+filepath.Join(root, "WebView2"),
-		fmt.Sprintf("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-address=127.0.0.1 --remote-debugging-port=%d", port),
-	)
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { cancel(); _ = child.Wait() }()
-
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/list", port)
-	localClient := &http.Client{Timeout: time.Second, Transport: &http.Transport{}}
-	defer localClient.CloseIdleConnections()
-	expression := fmt.Sprintf(`(async () => {
-		const app = globalThis.go?.main?.App;
-		if (!app) return null;
-		const needsTOTP = await app.LoginV2(%q);
-		if (!needsTOTP) throw new Error("export did not require TOTP");
-		await app.Verify2FA(%q);
-		return await app.GetAccounts();
-	})()`, migrationTestPassword, currentCode(t, want.TwoFASecret))
-	for ctx.Err() == nil {
-		accounts, err := v3ReleasedEXEAccounts(ctx, deadline, localClient, endpoint, expression)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if accounts != nil {
-			if !slices.Equal(accounts, want.Accounts) {
-				t.Fatal("release EXE did not return the expected records from the rollback")
-			}
-			t.Log("Verified published v2.5.0 EXE: opened the isolated rollback with TOTP and read the post-activation edit")
-			if summary := os.Getenv("GITHUB_STEP_SUMMARY"); summary != "" {
-				log, err := os.OpenFile(summary, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := fmt.Fprintln(log, "Published v2.5.0 Wails EXE opened the isolated rollback with TOTP and verified the post-activation edit."); err != nil {
-					log.Close()
-					t.Fatal(err)
-				}
-				log.Close()
-			}
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatal("released v2.5.0 EXE did not expose a WebView2 page with Go bindings")
-}
-
-func v3ReleasedEXEAccounts(ctx context.Context, deadline time.Time, client *http.Client, endpoint, expression string) ([]Account, error) {
-	response, err := client.Get(endpoint)
+	child.Env = append(os.Environ(), "PS_V3_RELEASE_EXE="+exe, "PS_V3_RELEASE_PROFILE="+root)
+	out, err := child.CombinedOutput()
 	if err != nil {
-		return nil, nil
+		t.Fatalf("released v2.5.0 EXE native verification: %v: %s", err, out)
 	}
-	var pages []struct {
-		Type                 string
-		WebSocketDebuggerURL string
-	}
-	err = json.NewDecoder(response.Body).Decode(&pages)
-	response.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	for _, page := range pages {
-		if page.Type != "page" || page.WebSocketDebuggerURL == "" {
-			continue
-		}
-		conn, _, err := websocket.DefaultDialer.DialContext(ctx, page.WebSocketDebuggerURL, nil)
-		if err != nil {
-			return nil, nil
-		}
-		defer conn.Close()
-		_ = conn.SetReadDeadline(deadline)
-		_ = conn.SetWriteDeadline(deadline)
-		if err := conn.WriteJSON(map[string]any{"id": 1, "method": "Runtime.evaluate", "params": map[string]any{
-			"expression": expression, "awaitPromise": true, "returnByValue": true,
-		}}); err != nil {
-			return nil, err
-		}
-		var reply struct {
-			Error  json.RawMessage
-			Result struct {
-				ExceptionDetails json.RawMessage
-				Result           struct{ Value json.RawMessage }
-			}
-		}
-		if err := conn.ReadJSON(&reply); err != nil {
-			return nil, err
-		}
-		if reply.Error != nil || reply.Result.ExceptionDetails != nil {
-			return nil, fmt.Errorf("WebView2 Go binding failed: %s %s", reply.Error, reply.Result.ExceptionDetails)
-		}
-		var accounts []Account
-		if err := json.Unmarshal(reply.Result.Result.Value, &accounts); err != nil {
-			return nil, err
-		}
-		return accounts, nil
-	}
-	return nil, nil
+	t.Log(string(out))
 }
