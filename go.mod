@@ -3,6 +3,7 @@ module password-saver
 go 1.26.4
 
 require (
+	github.com/fxamacker/cbor/v2 v2.10.0
 	github.com/ncruces/go-sqlite3 v0.38.0
 	github.com/pquerna/otp v1.5.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -39,6 +40,7 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/text v0.44.0 // indirect
 )
