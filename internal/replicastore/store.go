@@ -333,6 +333,9 @@ func (s *Store) commit(tx *sql.Tx) error {
 	return nil
 }
 
+// Identity returns the replica ID pinned to this handle.
+func (s *Store) Identity() [identitySize]byte { return s.identity }
+
 // Read returns the committed state as a detached snapshot.
 func (s *Store) Read(ctx context.Context) (View, error) {
 	s.mu.Lock()
