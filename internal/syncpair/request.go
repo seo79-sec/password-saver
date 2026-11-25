@@ -78,25 +78,33 @@ func NewRequest(controllerFingerprint [sha256.Size]byte, now time.Time) (wire []
 	if issuedAt < 0 || issuedAt > math.MaxInt64-requestLifetimeSeconds {
 		return nil, fingerprint, nil, errors.New("invalid pairing request issue time")
 	}
-	exchange, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fingerprint, nil, err
-	}
-	public, signing, err := ed25519.GenerateKey(rand.Reader)
+	keys, err = generateDeviceKeys()
 	if err != nil {
 		return nil, fingerprint, nil, err
 	}
 	header := RequestHeader{
 		Version: requestVersion, RequestID: randomID(), DeviceID: randomID(),
-		SigningPub: [32]byte(public), ExchangePub: [32]byte(exchange.PublicKey().Bytes()),
+		SigningPub: [32]byte(keys.signing.Public().(ed25519.PublicKey)), ExchangePub: [32]byte(keys.exchange.PublicKey().Bytes()),
 		ControllerFingerprint: controllerFingerprint, IssuedAt: issuedAt, ExpiresAt: issuedAt + requestLifetimeSeconds,
 	}
-	wire, err = signRequest(header, signing)
+	wire, err = signRequest(header, keys.signing)
 	if err != nil {
-		clear(signing)
+		clear(keys.signing)
 		return nil, fingerprint, nil, err
 	}
-	return wire, sha256.Sum256(wire), &DeviceKeys{signing: signing, exchange: exchange}, nil
+	return wire, sha256.Sum256(wire), keys, nil
+}
+
+func generateDeviceKeys() (*DeviceKeys, error) {
+	exchange, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	_, signing, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return &DeviceKeys{signing: signing, exchange: exchange}, nil
 }
 
 func randomID() (id [16]byte) {
