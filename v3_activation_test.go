@@ -95,6 +95,7 @@ func TestV3ActivationRestartAndRollback(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	checkV3RollbackReleasedEXE(t, filepath.Join(candidate.profile, v3RollbackFile), want)
 	if err := os.WriteFile(marker, []byte("damaged marker"), 0600); err != nil {
 		t.Fatal(err)
 	}
