@@ -338,24 +338,35 @@ func (s *Store) Identity() [identitySize]byte { return s.identity }
 
 // Read returns the committed state as a detached snapshot.
 func (s *Store) Read(ctx context.Context) (View, error) {
+	_, data, model, err := s.readState(ctx)
+	if err != nil {
+		return View{}, err
+	}
+	if data.Exchange != nil {
+		return View{}, ErrExchangeMode
+	}
+	return data.view(model), nil
+}
+
+func (s *Store) readState(ctx context.Context) (int64, *state, *syncmerge.Replica, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
-		return View{}, ErrClosed
+		return 0, nil, nil, ErrClosed
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return View{}, storageError(err)
+		return 0, nil, nil, storageError(err)
 	}
 	defer tx.Rollback()
-	identity, _, data, model, err := s.load(ctx, tx)
+	identity, generation, data, model, err := s.load(ctx, tx)
 	if err != nil {
-		return View{}, storageError(err)
+		return 0, nil, nil, storageError(err)
 	}
 	if identity != s.identity {
-		return View{}, ErrAuthentication
+		return 0, nil, nil, ErrAuthentication
 	}
-	return data.view(model), nil
+	return generation, data, model, nil
 }
 
 func (s *Store) Close() error {
