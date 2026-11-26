@@ -131,30 +131,21 @@ func decodeOperation(plaintext []byte, author [16]byte, digest [32]byte) (syncme
 	if err != nil {
 		return syncmerge.Operation{}, nil, err
 	}
-	if !bytes.Equal(plaintext, canonical) || payload.RecordID == [16]byte{} || payload.Parents == nil || payload.Data == nil {
+	if !bytes.Equal(plaintext, canonical) {
 		return syncmerge.Operation{}, nil, errors.New("invalid canonical change payload")
+	}
+	action, err := payload.validate()
+	if err != nil {
+		return syncmerge.Operation{}, nil, err
 	}
 	op := syncmerge.Operation{
 		ID: hex.EncodeToString(digest[:]), AuthorID: hex.EncodeToString(author[:]),
-		RecordID: hex.EncodeToString(payload.RecordID[:]), Data: payload.Data,
+		RecordID: hex.EncodeToString(payload.RecordID[:]), Action: action, Data: payload.Data,
 	}
-	switch payload.Action {
-	case 1:
-		op.Action = syncmerge.Put
-	case 2:
-		if len(payload.Data) != 0 {
-			return syncmerge.Operation{}, nil, errors.New("delete change payload contains data")
-		}
-		op.Action = syncmerge.Delete
-	default:
-		return syncmerge.Operation{}, nil, errors.New("unknown change action")
-	}
-	seen := make(map[[32]byte]struct{}, len(payload.Parents))
 	for _, parent := range payload.Parents {
-		if _, ok := seen[parent]; ok || parent == digest {
+		if parent == digest {
 			return syncmerge.Operation{}, nil, syncmerge.ErrInvalidParent
 		}
-		seen[parent] = struct{}{}
 		op.Parents = append(op.Parents, hex.EncodeToString(parent[:]))
 	}
 	return op, payload.Parents, nil
