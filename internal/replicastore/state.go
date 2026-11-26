@@ -56,6 +56,12 @@ type state struct {
 	Pending []queued
 	Counter uint64
 	Outbox  []string // IDs in local acceptance order, sequence starts at 1
+
+	Exchange *ExchangeState `json:",omitempty"`
+}
+
+func (s *state) emptyLegacy() bool {
+	return len(s.History) == 0 && len(s.Pending) == 0 && s.Counter == 0 && len(s.Outbox) == 0
 }
 
 func checkOperation(op syncmerge.Operation) error {
@@ -83,6 +89,11 @@ func checkOperation(op syncmerge.Operation) error {
 }
 
 func (s *state) encode() ([]byte, error) {
+	if s.Exchange != nil {
+		if _, err := s.Exchange.validate(); err != nil {
+			return nil, err
+		}
+	}
 	if len(s.History) > maxHistory || len(s.Pending) > maxPending {
 		return nil, ErrLimit
 	}
@@ -122,7 +133,8 @@ func decodeState(data []byte) (*state, *syncmerge.Replica, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, nil, ErrCorrupt
 	}
-	if len(s.History) > maxHistory || len(s.Pending) > maxPending || s.Counter != uint64(len(s.Outbox)) {
+	if len(s.History) > maxHistory || len(s.Pending) > maxPending || s.Counter != uint64(len(s.Outbox)) ||
+		(s.Exchange != nil && !s.emptyLegacy()) {
 		return nil, nil, ErrCorrupt
 	}
 	encoded, err := s.encode()
@@ -156,6 +168,9 @@ func decodeState(data []byte) (*state, *syncmerge.Replica, error) {
 }
 
 func (s *state) apply(model *syncmerge.Replica, op syncmerge.Operation, source Source) (syncmerge.Result, bool, error) {
+	if s.Exchange != nil {
+		return syncmerge.Result{}, false, ErrExchangeMode
+	}
 	result := model.Apply(op)
 	if result.Status == syncmerge.Rejected {
 		return result, false, nil
