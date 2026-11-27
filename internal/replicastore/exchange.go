@@ -19,9 +19,11 @@ const (
 var (
 	// ErrExchangeDisconnected means the binding is retained for local reads only.
 	ErrExchangeDisconnected = errors.New("replica exchange is disconnected")
-	ErrExchangeMode         = errors.New("replica requires the exchange transaction or is not empty")
-	ErrGeneration           = errors.New("replica generation changed")
-	ErrExchange             = errors.New("invalid replica exchange state or binding")
+	// ErrReconnectConfirmation indicates a conflicting or invalid reconnect confirmation.
+	ErrReconnectConfirmation = errors.New("invalid replica reconnect confirmation")
+	ErrExchangeMode          = errors.New("replica requires the exchange transaction or is not empty")
+	ErrGeneration            = errors.New("replica generation changed")
+	ErrExchange              = errors.New("invalid replica exchange state or binding")
 )
 
 type ExchangeBinding struct {
@@ -39,13 +41,20 @@ type ExchangeEnvelope struct {
 	Sequence    uint64
 }
 
+// ReconnectConfirmation binds the owner's decision to a reviewed generation and checkpoint.
+type ReconnectConfirmation struct {
+	Generation     int64
+	CheckpointHash [32]byte
+}
+
 type ExchangeState struct {
-	Binding              ExchangeBinding
-	Journal              []ExchangeEnvelope
-	SentSequence, Cursor uint64
-	Removal              *RemovalCandidate `json:",omitempty"`
-	ActivatedRemoval     *ActivatedRemoval `json:",omitempty"`
-	Disconnected         bool              `json:",omitempty"`
+	Binding               ExchangeBinding
+	Journal               []ExchangeEnvelope
+	SentSequence, Cursor  uint64
+	Removal               *RemovalCandidate      `json:",omitempty"`
+	ActivatedRemoval      *ActivatedRemoval      `json:",omitempty"`
+	Disconnected          bool                   `json:",omitempty"`
+	ReconnectConfirmation *ReconnectConfirmation `json:",omitempty"`
 }
 
 // ExchangeContext supplies the confirmed binding, checkpoint and keys for replay.
@@ -67,6 +76,10 @@ func (e *ExchangeState) validate() (uint64, error) {
 	if b.SpaceID == [16]byte{} || b.DeviceID == [16]byte{} || b.Epoch < 2 || b.RelayURL == "" ||
 		b.MembershipHash == [32]byte{} || b.CheckpointHash == [32]byte{} {
 		return 0, ErrExchange
+	}
+	if saved := e.ReconnectConfirmation; saved != nil &&
+		(!e.Disconnected || saved.Generation < 1 || saved.CheckpointHash == [32]byte{}) {
+		return 0, ErrReconnectConfirmation
 	}
 	if len(e.Journal) > maxExchangeEnvelopes {
 		return 0, ErrLimit
@@ -241,6 +254,48 @@ func (s *Store) DisconnectExchange(ctx context.Context, binding ExchangeBinding,
 		return ErrLimit
 	}
 	exchange.Disconnected = true
+	if err := s.write(ctx, tx, generation+1, data); err != nil {
+		return storageError(err)
+	}
+	return s.commit(tx)
+}
+
+// ConfirmReconnect saves a verified confirmation for a disconnected exchange.
+func (s *Store) ConfirmReconnect(ctx context.Context, binding ExchangeBinding, confirmation ReconnectConfirmation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return ErrClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError(err)
+	}
+	defer tx.Rollback()
+	identity, generation, data, _, err := s.load(ctx, tx)
+	if err != nil {
+		return storageError(err)
+	}
+	if identity != s.identity {
+		return ErrAuthentication
+	}
+	exchange := data.Exchange
+	if exchange == nil || exchange.Binding != binding || !exchange.Disconnected {
+		return ErrExchange
+	}
+	if saved := exchange.ReconnectConfirmation; saved != nil {
+		if *saved != confirmation || generation-1 != confirmation.Generation {
+			return ErrReconnectConfirmation
+		}
+		return nil
+	}
+	if generation != confirmation.Generation {
+		return ErrGeneration
+	}
+	if generation == math.MaxInt64 {
+		return ErrLimit
+	}
+	exchange.ReconnectConfirmation = &confirmation
 	if err := s.write(ctx, tx, generation+1, data); err != nil {
 		return storageError(err)
 	}
