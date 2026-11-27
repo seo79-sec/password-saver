@@ -53,7 +53,7 @@ func TestApplyReconnectSuffixCommitBoundary(t *testing.T) {
 	}, key, peerSigner)
 	check(err)
 	apply := func(generation int64) error {
-		return store.ApplyReconnectSuffix(ctx, confirmed, generation, 0, 1, [][]byte{wire})
+		return store.ApplyReconnectSuffix(ctx, confirmed, generation, 0, 1, 0, [][]byte{wire})
 	}
 	if err := apply(before.Generation - 1); !errors.Is(err, ErrGeneration) {
 		t.Fatalf("stale transaction returned %v", err)

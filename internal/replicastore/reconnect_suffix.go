@@ -5,9 +5,9 @@ import (
 	"math"
 )
 
-// ApplyReconnectSuffix appends incoming envelopes already verified against the
-// reviewed checkpoint. The replica stays disconnected.
-func (s *Store) ApplyReconnectSuffix(ctx context.Context, confirmed ExchangeContext, expected int64, after, through uint64, wires [][]byte) error {
+// ApplyReconnectSuffix records envelopes and local acknowledgements already
+// verified against the reviewed relay log and checkpoint. The replica stays disconnected.
+func (s *Store) ApplyReconnectSuffix(ctx context.Context, confirmed ExchangeContext, expected int64, after, through, sent uint64, wires [][]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
@@ -27,7 +27,7 @@ func (s *Store) ApplyReconnectSuffix(ctx context.Context, confirmed ExchangeCont
 	}
 	e := data.Exchange
 	if e == nil || !e.Disconnected || e.Binding != confirmed.Binding || e.Cursor != after ||
-		through <= after || len(wires) == 0 || uint64(len(wires)) > through-after {
+		through < after || uint64(len(wires)) > through-after {
 		return ErrExchange
 	}
 	if e.Removal != nil {
@@ -43,13 +43,13 @@ func (s *Store) ApplyReconnectSuffix(ctx context.Context, confirmed ExchangeCont
 	if err != nil {
 		return err
 	}
-	if e.SentSequence != sequence {
+	if sent != sequence || (len(wires) == 0 && sent == e.SentSequence) {
 		return ErrExchange
 	}
 	for _, wire := range wires {
 		e.Journal = append(e.Journal, ExchangeEnvelope{Wire: wire})
 	}
-	e.Cursor = through
+	e.Cursor, e.SentSequence = through, sent
 	e.ReconnectConfirmation = nil
 	replayed, err := e.replay(confirmed)
 	if err != nil {

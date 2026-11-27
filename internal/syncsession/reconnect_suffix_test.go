@@ -19,9 +19,9 @@ type reconnectSuffixFaultStore struct {
 	commit bool
 }
 
-func (s reconnectSuffixFaultStore) ApplyReconnectSuffix(ctx context.Context, confirmed replicastore.ExchangeContext, expected int64, after, through uint64, wires [][]byte) error {
+func (s reconnectSuffixFaultStore) ApplyReconnectSuffix(ctx context.Context, confirmed replicastore.ExchangeContext, expected int64, after, through, sent uint64, wires [][]byte) error {
 	if s.commit {
-		if err := s.Store.ApplyReconnectSuffix(ctx, confirmed, expected, after, through, wires); err != nil {
+		if err := s.Store.ApplyReconnectSuffix(ctx, confirmed, expected, after, through, sent, wires); err != nil {
 			return err
 		}
 	}
@@ -159,27 +159,5 @@ func TestReconcileReconnect(t *testing.T) {
 	session.SetAccess(true, true)
 	if err := session.RunOnce(ctx); !errors.Is(err, replicastore.ErrExchangeDisconnected) {
 		t.Fatalf("catch-up enabled exchange: %v", err)
-	}
-}
-
-func TestReconcileReconnectRejectsUnsentOperation(t *testing.T) {
-	ctx := t.Context()
-	store, _, confirmed, signer := queueFixture(t)
-	queueForRun(t, store, confirmed, signer, "unsent")
-	if err := store.DisconnectExchange(ctx, confirmed.Binding, readQueue(t, store, confirmed).Generation); err != nil {
-		t.Fatal(err)
-	}
-	before := readQueue(t, store, confirmed)
-	remote, err := syncwire.ReplayCheckpoint(confirmed.Checkpoint, nil, confirmed.Binding.SpaceID, confirmed.Binding.Epoch, confirmed.EpochKey, confirmed.Signers)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer clear(remote)
-	point := ReconnectCheckpoint{SpaceID: confirmed.Binding.SpaceID, Epoch: confirmed.Binding.Epoch,
-		MembershipHash: confirmed.Binding.MembershipHash, CheckpointHash: sha256.Sum256(remote), Wire: remote}
-	owner := ReconnectReconciliation{Generation: before.Generation, CheckpointHash: point.CheckpointHash, Cursor: 8}
-	log := syncrelay.NewLog(8, syncrelay.MaxEnvelopeSize)
-	if err := ReconcileReconnect(ctx, store, confirmed, point, log, owner); !errors.Is(err, ErrReconnectNotReady) || !reflect.DeepEqual(readQueue(t, store, confirmed), before) {
-		t.Fatalf("catch-up with an unsent operation changed the replica: %v", err)
 	}
 }

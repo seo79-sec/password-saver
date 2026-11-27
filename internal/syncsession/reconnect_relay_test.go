@@ -124,7 +124,7 @@ func TestVerifyReconnectRelayPrefixBounds(t *testing.T) {
 		t.Fatal("cursor zero must not read a page")
 		return nil, nil
 	}
-	if err := verifyReconnectRelayPrefix(ctx, noRead, 0, nil); err != nil {
+	if err := verifyReconnectRelayPrefix(ctx, noRead, 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	seen := map[string]struct{}{"wire": {}}
@@ -134,7 +134,7 @@ func TestVerifyReconnectRelayPrefixBounds(t *testing.T) {
 		}
 		return []syncrelay.Entry{{Cursor: 2, Wire: []byte("wire")}}, nil
 	}
-	if err := verifyReconnectRelayPrefix(ctx, gap, 1, seen); !errors.Is(err, ErrReconnectRelayLog) {
+	if err := verifyReconnectRelayPrefix(ctx, gap, 1, seen, nil); !errors.Is(err, ErrReconnectRelayLog) {
 		t.Fatalf("gap in relay positions: %v", err)
 	}
 }
