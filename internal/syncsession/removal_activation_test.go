@@ -107,6 +107,9 @@ func TestPrepareRemovalActivation(t *testing.T) {
 				require(t, err)
 			}
 			require(t, store.StageRemoval(ctx, binding, previous, fingerprint, owner, candidate))
+			if _, err := NewRemovalSession(ctx, store, binding, fingerprint, owner, nil, nil, nil); !errors.Is(err, ErrRemovalRelayPaused) {
+				t.Fatalf("staged removal reached relay setup: %v", err)
+			}
 			require(t, store.Close())
 			store, err = replicastore.Open(ctx, path, storeKey)
 			require(t, err)
@@ -197,6 +200,7 @@ func TestPrepareRemovalActivation(t *testing.T) {
 				if !reflect.DeepEqual(afterRetry, withEdit) {
 					t.Fatal("activation retry reset the new epoch's local edits")
 				}
+				testRemovalRelayResume(t, store, binding, fingerprint, owner, peer.DeviceID, wire)
 			}
 		})
 	}

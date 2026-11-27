@@ -31,6 +31,7 @@ type Session struct {
 	store      ExchangeStore
 	confirmed  replicastore.ExchangeContext
 	relay      Relay
+	removalID  [32]byte
 }
 
 // NewSession starts a locked session with exchange disabled.
@@ -82,7 +83,10 @@ func (s *Session) RunOnce(ctx context.Context) error {
 	if view.State == nil {
 		return replicastore.ErrExchangeMode
 	}
-	if view.State.Removal != nil || view.State.ActivatedRemoval != nil {
+	active := view.State.ActivatedRemoval
+	if view.State.Removal != nil ||
+		(active == nil && s.removalID != [32]byte{}) ||
+		(active != nil && (s.removalID == [32]byte{} || active.ID != s.removalID)) {
 		return ErrRemovalRelayPaused
 	}
 	var quotaErr error
