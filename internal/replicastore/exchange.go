@@ -17,9 +17,11 @@ const (
 )
 
 var (
-	ErrExchangeMode = errors.New("replica requires the exchange transaction or is not empty")
-	ErrGeneration   = errors.New("replica generation changed")
-	ErrExchange     = errors.New("invalid replica exchange state or binding")
+	// ErrExchangeDisconnected means the binding is retained for local reads only.
+	ErrExchangeDisconnected = errors.New("replica exchange is disconnected")
+	ErrExchangeMode         = errors.New("replica requires the exchange transaction or is not empty")
+	ErrGeneration           = errors.New("replica generation changed")
+	ErrExchange             = errors.New("invalid replica exchange state or binding")
 )
 
 type ExchangeBinding struct {
@@ -43,6 +45,7 @@ type ExchangeState struct {
 	SentSequence, Cursor uint64
 	Removal              *RemovalCandidate `json:",omitempty"`
 	ActivatedRemoval     *ActivatedRemoval `json:",omitempty"`
+	Disconnected         bool              `json:",omitempty"`
 }
 
 // ExchangeContext supplies the confirmed binding, checkpoint and keys for replay.
@@ -171,6 +174,9 @@ func (s *Store) CommitExchange(ctx context.Context, confirmed ExchangeContext, e
 	if identity != s.identity {
 		return ErrAuthentication
 	}
+	if data.Exchange != nil && data.Exchange.Disconnected {
+		return ErrExchangeDisconnected
+	}
 	if data.Exchange != nil && data.Exchange.Removal != nil {
 		return ErrRemovalStaged
 	}
@@ -195,6 +201,46 @@ func (s *Store) CommitExchange(ctx context.Context, confirmed ExchangeContext, e
 	if _, err := e.replay(confirmed); err != nil {
 		return err
 	}
+	if err := s.write(ctx, tx, generation+1, data); err != nil {
+		return storageError(err)
+	}
+	return s.commit(tx)
+}
+
+// DisconnectExchange durably stops exchange while keeping the replica readable.
+func (s *Store) DisconnectExchange(ctx context.Context, binding ExchangeBinding, expectedGeneration int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return ErrClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError(err)
+	}
+	defer tx.Rollback()
+	identity, generation, data, _, err := s.load(ctx, tx)
+	if err != nil {
+		return storageError(err)
+	}
+	if identity != s.identity {
+		return ErrAuthentication
+	}
+	exchange := data.Exchange
+	if exchange == nil || exchange.Binding != binding {
+		return ErrExchange
+	}
+	// A lost commit response leaves the caller with the preceding generation.
+	if expectedGeneration != generation && (!exchange.Disconnected || expectedGeneration != generation-1) {
+		return ErrGeneration
+	}
+	if exchange.Disconnected {
+		return nil
+	}
+	if generation == math.MaxInt64 {
+		return ErrLimit
+	}
+	exchange.Disconnected = true
 	if err := s.write(ctx, tx, generation+1, data); err != nil {
 		return storageError(err)
 	}

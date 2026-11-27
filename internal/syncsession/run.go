@@ -106,6 +106,9 @@ func (s *Session) RunOnce(ctx context.Context) error {
 	if view.State == nil {
 		return replicastore.ErrExchangeMode
 	}
+	if view.State.Disconnected {
+		return replicastore.ErrExchangeDisconnected
+	}
 	active := view.State.ActivatedRemoval
 	if view.State.Removal != nil ||
 		(active == nil && s.removalID != [32]byte{}) ||
