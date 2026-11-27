@@ -82,6 +82,9 @@ func (s *Session) RunOnce(ctx context.Context) error {
 	if view.State == nil {
 		return replicastore.ErrExchangeMode
 	}
+	if view.State.Removal != nil || view.State.ActivatedRemoval != nil {
+		return ErrRemovalRelayPaused
+	}
 	var quotaErr error
 	for _, entry := range view.State.Journal {
 		if entry.Sequence <= view.State.SentSequence {

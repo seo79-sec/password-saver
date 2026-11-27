@@ -148,4 +148,60 @@ func TestStageRemoval(t *testing.T) {
 		t.Fatalf("late old-epoch write: %v", err)
 	}
 	assertView(expected)
+
+	key, err := owner.OpenRemovalKeyPackage(candidate.KeyPackage, previous, candidate.Membership, fingerprint, candidate.Checkpoint)
+	require(err)
+	defer clear(key[:])
+	plaintext, err := syncpair.OpenRemovalCheckpointBytes(candidate.Checkpoint, previous, candidate.Membership, fingerprint, key)
+	require(err)
+	defer clear(plaintext)
+	next := ExchangeContext{Binding: binding, Checkpoint: plaintext, EpochKey: key[:],
+		Signers: map[[16]byte]ed25519.PublicKey{h.OwnerID: h.Members[0].SigningPub[:]}}
+	next.Binding.Epoch++
+	next.Binding.MembershipHash = sha256.Sum256(candidate.Membership)
+	next.Binding.CheckpointHash = sha256.Sum256(plaintext)
+	activate := func(expectedGeneration int64, transition RemovalCandidate, next ExchangeContext) error {
+		return store.ActivateRemoval(ctx, binding, previous, fingerprint, expectedGeneration, transition, next)
+	}
+	if err := activate(expected.Generation+1, candidate, next); !errors.Is(err, ErrGeneration) {
+		t.Fatalf("stale activation generation: %v", err)
+	}
+	if err := activate(expected.Generation, alternative, next); !errors.Is(err, ErrRemovalStaged) {
+		t.Fatalf("changed activation artifacts: %v", err)
+	}
+	invalid := next
+	invalid.Binding.DeviceID = peer.DeviceID
+	if err := activate(expected.Generation, candidate, invalid); !errors.Is(err, ErrExchange) {
+		t.Fatalf("changed activation binding: %v", err)
+	}
+	if err := activate(expected.Generation, candidate, next); !errors.Is(err, injected) || errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("activation before commit: %v", err)
+	}
+	assertView(expected)
+	store.beforeCommit = nil
+	store.afterCommit = func() error { return injected }
+	if err := activate(expected.Generation, candidate, next); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("activation after commit: %v", err)
+	}
+	store.afterCommit = nil
+	view, err := store.ReadExchange(ctx, next)
+	require(err)
+	if view.Generation != expected.Generation+1 || len(view.State.Journal) != 0 ||
+		view.State.SentSequence != 0 || view.State.Cursor != 0 || view.State.Removal != nil ||
+		!reflect.DeepEqual(view.State.ActivatedRemoval.Transition, candidate) {
+		t.Fatal("activation did not replace the journal and preserve the exact transition")
+	}
+	if _, err := store.ReadExchange(ctx, confirmed); !errors.Is(err, ErrExchange) {
+		t.Fatalf("old read after activation: %v", err)
+	}
+	if err := store.CommitExchange(ctx, confirmed, view.Generation, nil, 0, 0); !errors.Is(err, ErrExchange) {
+		t.Fatalf("old write after activation: %v", err)
+	}
+	store.beforeCommit = func() error { return injected }
+	require(activate(expected.Generation, candidate, next))
+	retry, err := store.ReadExchange(ctx, next)
+	require(err)
+	if !reflect.DeepEqual(view, retry) {
+		t.Fatal("exact retry changed the activated replica")
+	}
 }
