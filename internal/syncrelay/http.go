@@ -27,8 +27,17 @@ func NewHandler(log *Log, tokenHash [sha256.Size]byte) http.Handler {
 }
 
 // NewDeviceHandler serves one log over TLS using the active device tokens.
+// Mismatched log and access pairs fail authorization.
 func NewDeviceHandler(log *Log, access *DeviceAccess) http.Handler {
-	return relayHandler{log: log, access: access}
+	if log != nil && access != nil {
+		access.mu.Lock()
+		bound := access.bindLog(log)
+		access.mu.Unlock()
+		if bound {
+			return relayHandler{log: log, access: access}
+		}
+	}
+	return relayHandler{}
 }
 
 type relayHandler struct {

@@ -27,6 +27,7 @@ type Entry struct {
 
 // Log stores envelopes for one space and supports concurrent callers.
 type Log struct {
+	access     *DeviceAccess
 	mu         sync.RWMutex
 	maxEntries int
 	maxBytes   int
