@@ -2,7 +2,6 @@ package syncrelay
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,51 +23,73 @@ var (
 // NewHandler serves one log over TLS. tokenHash is the SHA-256 of the raw
 // 32-byte token represented as unpadded base64url in the Authorization header.
 func NewHandler(log *Log, tokenHash [sha256.Size]byte) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS == nil {
-			http.Error(w, "TLS required", http.StatusForbidden)
-			return
-		}
-		if !authorized(r.Header.Values("Authorization"), tokenHash) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if r.URL.Path != envelopesPath {
-			http.NotFound(w, r)
-			return
-		}
-		switch r.Method {
-		case http.MethodPost:
-			appendEnvelope(w, r, log)
-		case http.MethodGet:
-			listEnvelopes(w, r, log)
-		default:
-			w.Header().Set("Allow", "GET, POST")
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
+	return NewDeviceHandler(log, &DeviceAccess{tokenHashes: map[[16]byte][sha256.Size]byte{{1}: tokenHash}})
 }
 
-func authorized(values []string, want [sha256.Size]byte) bool {
+// NewDeviceHandler serves one log over TLS using the active device tokens.
+func NewDeviceHandler(log *Log, access *DeviceAccess) http.Handler {
+	return relayHandler{log: log, access: access}
+}
+
+type relayHandler struct {
+	log    *Log
+	access *DeviceAccess
+}
+
+func (h relayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.TLS == nil {
+		http.Error(w, "TLS required", http.StatusForbidden)
+		return
+	}
+	digest, ok := bearerTokenHash(r.Header.Values("Authorization"))
+	if !ok {
+		writeUnauthorized(w)
+		return
+	}
+	unlock := h.access.lockAuthorized(digest)
+	if unlock == nil {
+		writeUnauthorized(w)
+		return
+	}
+	unlock()
+
+	if r.URL.Path != envelopesPath {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		h.appendEnvelope(w, r, digest)
+	case http.MethodGet:
+		h.listEnvelopes(w, r, digest)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+func bearerTokenHash(values []string) ([sha256.Size]byte, bool) {
 	if len(values) != 1 {
-		return false
+		return [sha256.Size]byte{}, false
 	}
 	scheme, encoded, _ := strings.Cut(values[0], " ")
 	encoded = strings.TrimLeft(encoded, " ")
 	var token [32]byte
 	if !strings.EqualFold(scheme, "Bearer") || len(encoded) != relayTokenEncoding.EncodedLen(len(token)) {
-		return false
+		return [sha256.Size]byte{}, false
 	}
 	n, err := relayTokenEncoding.Decode(token[:], []byte(encoded))
 	if err != nil || n != len(token) {
-		return false
+		return [sha256.Size]byte{}, false
 	}
-	digest := sha256.Sum256(token[:])
-	return subtle.ConstantTimeCompare(digest[:], want[:]) == 1
+	return sha256.Sum256(token[:]), true
 }
-
-func appendEnvelope(w http.ResponseWriter, r *http.Request, log *Log) {
+func (h relayHandler) appendEnvelope(w http.ResponseWriter, r *http.Request, digest [sha256.Size]byte) {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/octet-stream" {
 		http.Error(w, "application/octet-stream required", http.StatusUnsupportedMediaType)
@@ -86,7 +107,13 @@ func appendEnvelope(w http.ResponseWriter, r *http.Request, log *Log) {
 		http.Error(w, "invalid envelope body", http.StatusBadRequest)
 		return
 	}
-	cursor, err := log.Append(wire)
+	unlock := h.access.lockAuthorized(digest)
+	if unlock == nil {
+		writeUnauthorized(w)
+		return
+	}
+	cursor, err := h.log.Append(wire)
+	unlock()
 	if errors.Is(err, ErrQuotaExceeded) {
 		http.Error(w, "relay quota exceeded", http.StatusInsufficientStorage)
 		return
@@ -105,13 +132,19 @@ type relayEntry struct {
 	Wire   []byte `json:"wire"`
 }
 
-func listEnvelopes(w http.ResponseWriter, r *http.Request, log *Log) {
+func (h relayHandler) listEnvelopes(w http.ResponseWriter, r *http.Request, digest [sha256.Size]byte) {
 	after, limit, err := listQuery(r.URL.RawQuery)
 	if err != nil {
 		http.Error(w, "invalid envelope list query", http.StatusBadRequest)
 		return
 	}
-	page, err := log.List(after, limit)
+	unlock := h.access.lockAuthorized(digest)
+	if unlock == nil {
+		writeUnauthorized(w)
+		return
+	}
+	page, err := h.log.List(after, limit)
+	unlock()
 	if err != nil {
 		http.Error(w, "cursor out of range", http.StatusBadRequest)
 		return
