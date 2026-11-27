@@ -152,3 +152,11 @@ func (pkg signedRemovalKeyPackage) signatureInput() ([]byte, error) {
 	err := encMode.NewEncoder(&buffer).Encode([]any{pkg.Header, pkg.Enc, pkg.Ciphertext})
 	return buffer.Bytes(), err
 }
+
+// OpenRemovalKeyPackage opens an epoch key package for the owner's device.
+func (keys *SpaceKeys) OpenRemovalKeyPackage(wire, previous, current []byte, confirmed [32]byte, checkpoint []byte) ([32]byte, error) {
+	if keys == nil {
+		return [32]byte{}, errors.New("owner keys required")
+	}
+	return keys.device.OpenRemovalKeyPackage(wire, previous, current, confirmed, checkpoint)
+}

@@ -17,6 +17,9 @@ const (
 // ErrReplayPendingLimit indicates that the unresolved envelopes exceed a replay quota.
 var ErrReplayPendingLimit = errors.New("replay pending envelope quota exceeded")
 
+// ErrReplayPending indicates that unresolved envelopes remain after replay.
+var ErrReplayPending = errors.New("replay has unresolved envelopes")
+
 // WriterHead records the last accepted sequence and envelope hash in the new epoch.
 type WriterHead struct {
 	Seq  uint64
@@ -33,28 +36,9 @@ type ReplayResult struct {
 // Replay restores an authenticated checkpoint and submits the journal in order.
 // It retries waiting envelopes after progress and returns a zero result on error.
 func Replay(checkpoint []byte, journal [][]byte, spaceID [16]byte, epoch uint64, epochKey []byte, signers map[[16]byte]ed25519.PublicKey) (ReplayResult, error) {
-	receiver, err := RestoreCheckpoint(checkpoint, spaceID, epoch, epochKey, signers)
+	receiver, queue, err := replayJournal(checkpoint, journal, spaceID, epoch, epochKey, signers)
 	if err != nil {
 		return ReplayResult{}, err
-	}
-	queue := replayQueue{ids: make(map[string]struct{})}
-	for i, wire := range journal {
-		before := len(receiver.accepted)
-		outcome := receiver.Receive(wire)
-		switch outcome.Status {
-		case syncmerge.Waiting:
-			if err := queue.hold(i+1, wire, outcome.ID); err != nil {
-				return ReplayResult{}, fmt.Errorf("replay envelope %d: %w", i+1, err)
-			}
-		case syncmerge.Applied:
-			if len(receiver.accepted) > before {
-				if err := queue.retry(receiver); err != nil {
-					return ReplayResult{}, err
-				}
-			}
-		default:
-			return ReplayResult{}, fmt.Errorf("replay envelope %d: %w", i+1, outcome.Err)
-		}
 	}
 	result := ReplayResult{Snapshot: receiver.Snapshot(), Heads: make(map[[16]byte]WriterHead)}
 	for writer, chain := range receiver.chains {
@@ -66,6 +50,45 @@ func Replay(checkpoint []byte, journal [][]byte, spaceID [16]byte, epoch uint64,
 		result.Pending = append(result.Pending, bytes.Clone(pending.wire))
 	}
 	return result, nil
+}
+
+// ReplayCheckpoint replays the journal and exports its accepted history.
+// It rejects unresolved envelopes so a transition cannot drop pending changes.
+func ReplayCheckpoint(checkpoint []byte, journal [][]byte, spaceID [16]byte, epoch uint64, epochKey []byte, signers map[[16]byte]ed25519.PublicKey) ([]byte, error) {
+	receiver, queue, err := replayJournal(checkpoint, journal, spaceID, epoch, epochKey, signers)
+	if err != nil {
+		return nil, err
+	}
+	if len(queue.envelopes) > 0 {
+		return nil, ErrReplayPending
+	}
+	return receiver.MarshalCheckpoint()
+}
+func replayJournal(checkpoint []byte, journal [][]byte, spaceID [16]byte, epoch uint64, epochKey []byte, signers map[[16]byte]ed25519.PublicKey) (*Receiver, replayQueue, error) {
+	receiver, err := RestoreCheckpoint(checkpoint, spaceID, epoch, epochKey, signers)
+	if err != nil {
+		return nil, replayQueue{}, err
+	}
+	queue := replayQueue{ids: make(map[string]struct{})}
+	for i, wire := range journal {
+		before := len(receiver.accepted)
+		outcome := receiver.Receive(wire)
+		switch outcome.Status {
+		case syncmerge.Waiting:
+			if err := queue.hold(i+1, wire, outcome.ID); err != nil {
+				return nil, replayQueue{}, fmt.Errorf("replay envelope %d: %w", i+1, err)
+			}
+		case syncmerge.Applied:
+			if len(receiver.accepted) > before {
+				if err := queue.retry(receiver); err != nil {
+					return nil, replayQueue{}, err
+				}
+			}
+		default:
+			return nil, replayQueue{}, fmt.Errorf("replay envelope %d: %w", i+1, outcome.Err)
+		}
+	}
+	return receiver, queue, nil
 }
 
 type pendingEnvelope struct {
