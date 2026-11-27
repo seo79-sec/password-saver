@@ -44,7 +44,7 @@ type AnswerPayload struct {
 // IssuedAnswerMatchesRequest checks the binding in an answer from authenticated local storage.
 func IssuedAnswerMatchesRequest(wire []byte, digest [32]byte) bool {
 	var answer signedAnswer
-	return len(wire) <= maxAnswerSize && decodeAnswer(wire, &answer) == nil && answer.Header.RequestHash == digest
+	return len(wire) <= maxAnswerSize && decodeCanonicalPairing(wire, &answer) == nil && answer.Header.RequestHash == digest
 }
 
 // IssueAnswer adds the requester to the initial membership and encrypts the payload.
@@ -108,7 +108,7 @@ func (keys *DeviceKeys) OpenAnswer(wire, requestWire []byte, confirmedController
 		return Membership{}, AnswerPayload{}, errors.New("pairing answer exceeds size limit")
 	}
 	var answer signedAnswer
-	if err := decodeAnswer(wire, &answer); err != nil {
+	if err := decodeCanonicalPairing(wire, &answer); err != nil {
 		return Membership{}, AnswerPayload{}, err
 	}
 	request, digest, err := ParseRequest(requestWire, now)
@@ -165,7 +165,7 @@ func (a signedAnswer) openPayload(exchange *ecdh.PrivateKey) (AnswerPayload, err
 	}
 	defer clear(plaintext)
 	var payload AnswerPayload
-	if err := decodeAnswer(plaintext, &payload); err != nil {
+	if err := decodeCanonicalPairing(plaintext, &payload); err != nil {
 		return AnswerPayload{}, err
 	}
 	if payload.Checkpoint == nil || len(payload.Checkpoint) > maxCheckpointSize {
@@ -181,7 +181,7 @@ func (a signedAnswer) signatureInput() ([]byte, error) {
 	return buffer.Bytes(), err
 }
 
-func decodeAnswer(wire []byte, value any) error {
+func decodeCanonicalPairing(wire []byte, value any) error {
 	if err := decMode.Unmarshal(wire, value); err != nil {
 		return err
 	}
