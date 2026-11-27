@@ -122,20 +122,9 @@ func (a *App) exportV3Migration(ctx context.Context, candidate v3MigrationCandid
 	}
 	vault := &Vault{Accounts: accounts, TwoFAEnabled: a.vault.TwoFAEnabled, TwoFASecret: a.vault.TwoFASecret}
 	defer wipeVault(vault)
-	plain, err := json.Marshal(vault)
+	container, err := verifiedV3V2Export(a.v2Session.engine, session, password, vault)
 	if err != nil {
 		return "", err
-	}
-	defer wipeBytes(plain)
-	container, err := session.Encrypt(plain)
-	if err != nil {
-		return "", err
-	}
-	verified, reopened, err := a.v2Session.engine.Unlock(password, container)
-	verified.Close()
-	defer wipeBytes(reopened)
-	if err != nil || !bytes.Equal(plain, reopened) {
-		return "", errors.Join(ErrVaultMigrationMismatch, err)
 	}
 	path := filepath.Join(candidate.profile, "vault-export.v2.enc")
 	if err := writeFileAtomicNoReplaceChecked(path, container, func() error {
@@ -144,6 +133,56 @@ func (a *App) exportV3Migration(ctx context.Context, candidate v3MigrationCandid
 		return "", err
 	}
 	return path, nil
+}
+
+// exportV3DisconnectedCopy writes a verified v2 container from the local snapshot.
+func exportV3DisconnectedCopy(ctx context.Context, dir string, engine *cryptov2.Engine, password, code string, confirmed replicastore.ExchangeContext) (string, error) {
+	path := filepath.Join(dir, "vault-disconnected.v2.enc")
+	err := withV3Copy(ctx, dir, engine, password, code, func(p *v3OpenedCopy) error {
+		if p.replica == nil {
+			return ErrVaultActivationDenied
+		}
+		view, err := p.replica.ReadExchange(ctx, confirmed)
+		if err != nil {
+			return err
+		}
+		if view.State == nil || !view.State.Disconnected {
+			return ErrVaultActivationDenied
+		}
+		accounts, err := v3AccountsFromRecords(view.Snapshot)
+		if err != nil {
+			return err
+		}
+		vault := &Vault{Accounts: accounts, TwoFAEnabled: p.vault.TwoFAEnabled, TwoFASecret: p.vault.TwoFASecret}
+		defer wipeVault(vault)
+		container, err := verifiedV3V2Export(engine, p.session, password, vault)
+		if err != nil {
+			return err
+		}
+		return writeFileAtomicNoReplaceChecked(path, container, ctx.Err)
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+func verifiedV3V2Export(engine *cryptov2.Engine, session *cryptov2.Session, password string, vault *Vault) ([]byte, error) {
+	plain, err := json.Marshal(vault)
+	if err != nil {
+		return nil, err
+	}
+	defer wipeBytes(plain)
+	container, err := session.Encrypt(plain)
+	if err != nil {
+		return nil, err
+	}
+	verified, reopened, err := engine.Unlock(password, container)
+	verified.Close()
+	defer wipeBytes(reopened)
+	if err != nil || !bytes.Equal(plain, reopened) {
+		return nil, errors.Join(ErrVaultMigrationMismatch, err)
+	}
+	return container, nil
 }
 
 func readV3MigrationRecords(ctx context.Context, session *cryptov2.Session, candidate v3MigrationCandidate) ([]Account, error) {
