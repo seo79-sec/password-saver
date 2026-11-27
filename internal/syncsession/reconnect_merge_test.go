@@ -1,6 +1,7 @@
 package syncsession
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -18,7 +19,7 @@ import (
 	"password-saver/internal/syncwire"
 )
 
-func TestPreviewReconnectMerge(t *testing.T) {
+func TestPreviewAndApplyReconnectMerge(t *testing.T) {
 	ctx := t.Context()
 	require := func(err error) {
 		t.Helper()
@@ -34,7 +35,8 @@ func TestPreviewReconnectMerge(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	confirmed.Binding.RelayURL = server.URL
-	store, err := replicastore.Create(ctx, filepath.Join(t.TempDir(), "merge.sqlite"), queueTestKey)
+	path := filepath.Join(t.TempDir(), "merge.sqlite")
+	store, err := replicastore.Create(ctx, path, queueTestKey)
 	require(err)
 	t.Cleanup(func() { _ = store.Close() })
 	read := func() replicastore.ExchangeView { return readQueue(t, store, confirmed) }
@@ -86,8 +88,8 @@ func TestPreviewReconnectMerge(t *testing.T) {
 		return wire
 	}
 	echo := queue("echo", operation(4, syncmerge.Put, "accepted on relay"))
-	queue("edit1", operation(1, syncmerge.Put, "local candidate", root1))
-	queue("edit2", operation(2, syncmerge.Put, "keep locally", root2))
+	localEdit1 := queue("edit1", operation(1, syncmerge.Put, "local candidate", root1))
+	localEdit2 := queue("edit2", operation(2, syncmerge.Put, "keep locally", root2))
 	edit, _ := seal(operation(1, syncmerge.Put, "peer candidate", root1))
 	deletion, _ := seal(operation(2, syncmerge.Delete, "", root2))
 	independent, independentID := seal(operation(3, syncmerge.Put, "peer only"))
@@ -115,14 +117,18 @@ func TestPreviewReconnectMerge(t *testing.T) {
 		id := [16]byte{first}
 		return hex.EncodeToString(id[:])
 	}
-	want := ReconnectMergePreview{Generation: before.Generation, CheckpointHash: remote.CheckpointHash, Cursor: through, Unsent: 2,
+	merged := point(append(slices.Clone(common), echo, localEdit1, localEdit2, edit, deletion, independent))
+	want := ReconnectMergePreview{MergeHash: merged.CheckpointHash, Generation: before.Generation, CheckpointHash: remote.CheckpointHash, Cursor: through, Unsent: 2,
 		Records: []ReconnectMergeRecord{
 			{ID: recordID(1), Local: ReconnectVersionCounts{Versions: 1}, Merged: ReconnectVersionCounts{Versions: 2}},
 			{ID: recordID(2), Local: ReconnectVersionCounts{Versions: 1}, Merged: ReconnectVersionCounts{Versions: 2, Deletions: 1}},
 			{ID: recordID(3), Merged: ReconnectVersionCounts{Versions: 1}},
 		},
 	}
-	if !reflect.DeepEqual(got, want) || reader.reads != 1 {
+	owner := got.Confirmation()
+	public := got
+	public.confirmation = ReconnectMergeConfirmation{}
+	if !reflect.DeepEqual(public, want) || reader.reads != 1 {
 		t.Fatalf("got %+v after %d reads, want %+v after one read", got, reader.reads, want)
 	}
 
@@ -156,6 +162,92 @@ func TestPreviewReconnectMerge(t *testing.T) {
 	if !reflect.DeepEqual(read(), before) || requests.Load() != 0 {
 		t.Fatal("preview changed the stored replica or contacted the relay")
 	}
+	prefixPoint := point(common)
+	noIncoming, err := PreviewReconnectMerge(ctx, store, confirmed, prefixPoint, prefix, uint64(len(common)))
+	require(err)
+	if err := ApplyReconnectMerge(ctx, store, confirmed, prefixPoint, prefix, noIncoming.Confirmation()); !errors.Is(err, ErrReconnectNotReady) || !reflect.DeepEqual(read(), before) {
+		t.Fatalf("apply without incoming envelopes changed the replica or returned %v", err)
+	}
+
+	reordered := slices.Clone(reviewed)
+	reordered[len(common)], reordered[len(common)+1] = reordered[len(common)+1], reordered[len(common)]
+	if point(reordered).CheckpointHash != remote.CheckpointHash {
+		t.Fatal("substituted log must have the same checkpoint as the original")
+	}
+	stale, wrongHash := owner, owner
+	stale.receipt.Generation--
+	wrongHash.receipt.MergeHash[0] ^= 1
+	otherStore, _, _, _ := queueFixture(t)
+	injected := errors.New("pre-commit failure")
+	for _, test := range []struct {
+		name  string
+		store reconnectMergeStore
+		owner ReconnectMergeConfirmation
+		log   *syncrelay.Log
+		want  error
+	}{
+		{"stale preview", store, stale, log, replicastore.ErrGeneration},
+		{"different merge hash", store, wrongHash, log, replicastore.ErrReconnectConfirmation},
+		{"another replica", otherStore, owner, log, replicastore.ErrReconnectConfirmation},
+		{"reordered relay history", store, owner, newLog(reordered...), replicastore.ErrReconnectConfirmation},
+		{"unresolved dependency", store, owner, newLog(missingDependency...), syncwire.ErrReplayPending},
+		{"staged removal", reconnectMergeFaultStore{Store: store, staged: true}, owner, log, ErrRemovalRelayPaused},
+		{"pre-commit failure", reconnectMergeFaultStore{Store: store, fault: injected}, owner, log, injected},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ApplyReconnectMerge(t.Context(), test.store, confirmed, remote, test.log, test.owner)
+			if !errors.Is(err, test.want) || !reflect.DeepEqual(read(), before) {
+				t.Fatalf("apply changed the replica or returned %v, want %v", err, test.want)
+			}
+		})
+	}
+	fault := reconnectMergeFaultStore{Store: store, commit: true, fault: replicastore.ErrCommitUnknown}
+	if err := ApplyReconnectMerge(ctx, fault, confirmed, remote, log, owner); !errors.Is(err, replicastore.ErrCommitUnknown) {
+		t.Fatalf("expected a lost commit response, got %v", err)
+	}
+	require(store.Close())
+	store, err = replicastore.Open(ctx, path, queueTestKey)
+	require(err)
+	after := read()
+	if after.Generation != before.Generation+1 || !after.State.Disconnected || after.State.Cursor != through ||
+		after.State.SentSequence != 1 || after.State.ReconnectConfirmation != nil ||
+		!reflect.DeepEqual(after.State.Journal[:len(before.State.Journal)], before.State.Journal) ||
+		len(after.State.Journal) != len(before.State.Journal)+3 {
+		t.Fatal("merge did not atomically preserve local commands and append the reviewed changes")
+	}
+	snapshotCheckpoint, err := replayRemovalCheckpoint(confirmed, after.State)
+	require(err)
+	defer clear(snapshotCheckpoint)
+	if sha256.Sum256(snapshotCheckpoint) != got.MergeHash {
+		t.Fatal("persisted conflict history differs from the reviewed merge")
+	}
+	require(ApplyReconnectMerge(ctx, store, confirmed, remote, log, owner))
+	if !reflect.DeepEqual(read(), after) || requests.Load() != 0 {
+		t.Fatal("exact retry changed the replica or contacted the relay")
+	}
+}
+
+type reconnectMergeFaultStore struct {
+	*replicastore.Store
+	fault          error
+	commit, staged bool
+}
+
+func (s reconnectMergeFaultStore) ReadExchange(ctx context.Context, confirmed replicastore.ExchangeContext) (replicastore.ExchangeView, error) {
+	view, err := s.Store.ReadExchange(ctx, confirmed)
+	if err == nil && s.staged {
+		view.State.Removal = &replicastore.RemovalCandidate{}
+	}
+	return view, err
+}
+
+func (s reconnectMergeFaultStore) ApplyReconnectMerge(ctx context.Context, confirmed replicastore.ExchangeContext, receipt replicastore.ReconnectMergeReceipt, after, sent uint64, wires [][]byte) error {
+	if s.commit {
+		if err := s.Store.ApplyReconnectMerge(ctx, confirmed, receipt, after, sent, wires); err != nil {
+			return err
+		}
+	}
+	return s.fault
 }
 
 func TestPreviewReconnectMergeRejectsUnresolvedLocalJournal(t *testing.T) {
