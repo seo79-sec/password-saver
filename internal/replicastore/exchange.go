@@ -41,6 +41,7 @@ type ExchangeState struct {
 	Binding              ExchangeBinding
 	Journal              []ExchangeEnvelope
 	SentSequence, Cursor uint64
+	Removal              *RemovalCandidate `json:",omitempty"`
 }
 
 // ExchangeContext supplies the confirmed binding, checkpoint and keys for replay.
@@ -67,6 +68,11 @@ func (e *ExchangeState) validate() (uint64, error) {
 		return 0, ErrLimit
 	}
 	size, sequence := 0, uint64(0)
+	if e.Removal != nil {
+		if err := e.Removal.validate(); err != nil {
+			return 0, err
+		}
+	}
 	commands := make(map[string]bool)
 	for _, entry := range e.Journal {
 		if len(entry.Wire) > maxExchangeWireBytes-size {
@@ -146,6 +152,9 @@ func (s *Store) CommitExchange(ctx context.Context, confirmed ExchangeContext, e
 	}
 	if identity != s.identity {
 		return ErrAuthentication
+	}
+	if data.Exchange != nil && data.Exchange.Removal != nil {
+		return ErrRemovalStaged
 	}
 	if generation != expected {
 		return ErrGeneration
