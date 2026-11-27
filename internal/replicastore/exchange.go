@@ -12,8 +12,10 @@ import (
 )
 
 const (
-	maxExchangeEnvelopes = 4096
-	maxExchangeWireBytes = 4 << 20
+	// MaxExchangeEnvelopes bounds the number of envelopes in a replica journal.
+	MaxExchangeEnvelopes = 4096
+	// MaxExchangeWireBytes bounds the total size of envelopes in a replica journal.
+	MaxExchangeWireBytes = 4 << 20
 )
 
 var (
@@ -82,7 +84,7 @@ func (e *ExchangeState) validate() (uint64, error) {
 		(!e.Disconnected || saved.Generation < 1 || saved.CheckpointHash == [32]byte{}) {
 		return 0, ErrReconnectConfirmation
 	}
-	if len(e.Journal) > maxExchangeEnvelopes {
+	if len(e.Journal) > MaxExchangeEnvelopes {
 		return 0, ErrLimit
 	}
 	size, sequence := 0, uint64(0)
@@ -104,7 +106,7 @@ func (e *ExchangeState) validate() (uint64, error) {
 	}
 	commands := make(map[string]bool)
 	for _, entry := range e.Journal {
-		if len(entry.Wire) > maxExchangeWireBytes-size {
+		if len(entry.Wire) > MaxExchangeWireBytes-size {
 			return 0, ErrLimit
 		}
 		size += len(entry.Wire)
@@ -197,7 +199,7 @@ func (s *Store) CommitExchange(ctx context.Context, confirmed ExchangeContext, e
 	if generation != expected {
 		return ErrGeneration
 	}
-	if generation == math.MaxInt64 || len(entries) > maxExchangeEnvelopes {
+	if generation == math.MaxInt64 || len(entries) > MaxExchangeEnvelopes {
 		return ErrLimit
 	}
 	if data.Exchange == nil {

@@ -71,23 +71,36 @@ func VerifyReconnectRelayLog(ctx context.Context, store reconnectReader, confirm
 
 func verifyReconnectRelayPrefix(ctx context.Context, list func(uint64, int) ([]syncrelay.Entry, error), cursor uint64, seen map[string]struct{}) error {
 	for after := uint64(0); after < cursor; {
-		if err := ctx.Err(); err != nil {
+		page, err := readReconnectRelayPage(ctx, list, after, cursor)
+		if err != nil {
 			return err
 		}
-		limit := int(min(cursor-after, uint64(syncrelay.MaxPageSize)))
-		page, err := list(after, limit)
-		if err != nil {
-			return fmt.Errorf("%w: %w", ErrReconnectRelayLog, err)
-		}
-		if len(page) != limit {
-			return fmt.Errorf("%w: incomplete page after %d", ErrReconnectRelayLog, after)
-		}
 		for _, entry := range page {
-			after++
-			if _, known := seen[string(entry.Wire)]; entry.Cursor != after || !known {
-				return fmt.Errorf("%w: unexpected envelope at position %d", ErrReconnectRelayLog, after)
+			if _, known := seen[string(entry.Wire)]; !known {
+				return fmt.Errorf("%w: unexpected envelope at position %d", ErrReconnectRelayLog, entry.Cursor)
 			}
+			after = entry.Cursor
 		}
 	}
 	return nil
+}
+
+func readReconnectRelayPage(ctx context.Context, list func(uint64, int) ([]syncrelay.Entry, error), after, through uint64) ([]syncrelay.Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	limit := int(min(through-after, uint64(syncrelay.MaxPageSize)))
+	page, err := list(after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReconnectRelayLog, err)
+	}
+	if len(page) != limit {
+		return nil, fmt.Errorf("%w: incomplete page after %d", ErrReconnectRelayLog, after)
+	}
+	for index, entry := range page {
+		if entry.Cursor != after+uint64(index)+1 {
+			return nil, fmt.Errorf("%w: unexpected position %d", ErrReconnectRelayLog, entry.Cursor)
+		}
+	}
+	return page, nil
 }
