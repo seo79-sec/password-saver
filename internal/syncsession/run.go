@@ -36,6 +36,7 @@ type Session struct {
 	confirmed    replicastore.ExchangeContext
 	relay        Relay
 	removalID    [32]byte
+	reconnectID  [16]byte
 }
 
 // NewSession starts a locked session with exchange disabled.
@@ -88,6 +89,9 @@ func (s *Session) Disconnect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if view.State != nil && view.State.ReconnectID != s.reconnectID {
+		return nil
+	}
 	return store.DisconnectExchange(ctx, s.confirmed.Binding, view.Generation)
 }
 
@@ -136,7 +140,7 @@ func (s *Session) RunOnce(ctx context.Context) error {
 	if view.State == nil {
 		return replicastore.ErrExchangeMode
 	}
-	if view.State.Disconnected {
+	if view.State.Disconnected || view.State.ReconnectID != s.reconnectID {
 		return replicastore.ErrExchangeDisconnected
 	}
 	active := view.State.ActivatedRemoval

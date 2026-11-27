@@ -55,6 +55,7 @@ type ExchangeState struct {
 	ActivatedRemoval      *ActivatedRemoval      `json:",omitempty"`
 	Disconnected          bool                   `json:",omitempty"`
 	ReconnectConfirmation *ReconnectConfirmation `json:",omitempty"`
+	ReconnectID           [16]byte               `json:",omitzero"`
 }
 
 // ExchangeContext supplies the confirmed binding, checkpoint and keys for replay.
@@ -296,6 +297,48 @@ func (s *Store) ConfirmReconnect(ctx context.Context, binding ExchangeBinding, c
 		return ErrLimit
 	}
 	exchange.ReconnectConfirmation = &confirmation
+	if err := s.write(ctx, tx, generation+1, data); err != nil {
+		return storageError(err)
+	}
+	return s.commit(tx)
+}
+
+// ReconnectExchange consumes the verified confirmation and opens a new exchange incarnation.
+func (s *Store) ReconnectExchange(ctx context.Context, binding ExchangeBinding, expected int64, cursor uint64, confirmation ReconnectConfirmation, id [16]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return ErrClosed
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError(err)
+	}
+	defer tx.Rollback()
+	identity, generation, data, _, err := s.load(ctx, tx)
+	if err != nil {
+		return storageError(err)
+	}
+	if identity != s.identity {
+		return ErrAuthentication
+	}
+	e := data.Exchange
+	if e == nil || e.Binding != binding || !e.Disconnected || e.Cursor != cursor || id == [16]byte{} || id == e.ReconnectID {
+		return ErrExchange
+	}
+	if e.Removal != nil {
+		return ErrRemovalStaged
+	}
+	if generation != expected {
+		return ErrGeneration
+	}
+	if e.ReconnectConfirmation == nil || *e.ReconnectConfirmation != confirmation || generation-1 != confirmation.Generation {
+		return ErrReconnectConfirmation
+	}
+	if generation == math.MaxInt64 {
+		return ErrLimit
+	}
+	e.Disconnected, e.ReconnectConfirmation, e.ReconnectID = false, nil, id
 	if err := s.write(ctx, tx, generation+1, data); err != nil {
 		return storageError(err)
 	}

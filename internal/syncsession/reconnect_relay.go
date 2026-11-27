@@ -12,8 +12,13 @@ import (
 // ErrReconnectRelayLog indicates that the relay prefix cannot be verified.
 var ErrReconnectRelayLog = errors.New("relay log does not match the reconnect cursor")
 
+type replicaIdentity interface {
+	Identity() [16]byte
+}
+
 // ReconnectRelayVerification records the exact local state and relay log verified.
 type ReconnectRelayVerification struct {
+	replicaID    [16]byte
 	log          *syncrelay.Log
 	binding      replicastore.ExchangeBinding
 	generation   int64
@@ -56,7 +61,11 @@ func VerifyReconnectRelayLog(ctx context.Context, store reconnectReader, confirm
 	if err := verifyReconnectRelayPrefix(ctx, log.List, state.Cursor, seen); err != nil {
 		return ReconnectRelayVerification{}, err
 	}
-	return ReconnectRelayVerification{log: log, binding: state.Binding, generation: view.Generation,
+	var replicaID [16]byte
+	if replica, ok := store.(replicaIdentity); ok {
+		replicaID = replica.Identity()
+	}
+	return ReconnectRelayVerification{replicaID: replicaID, log: log, binding: state.Binding, generation: view.Generation,
 		cursor: state.Cursor, confirmation: *saved}, nil
 }
 

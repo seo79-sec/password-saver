@@ -84,4 +84,22 @@ func TestConfirmReconnectPersistsOnce(t *testing.T) {
 	if !reflect.DeepEqual(read(), before) {
 		t.Fatal("reopened exchange lost the confirmation or changed other state")
 	}
+
+	id := [16]byte{1}
+	reconnect := func() error {
+		return store.ReconnectExchange(ctx, binding, before.Generation, before.State.Cursor, ownerDecision, id)
+	}
+	if err := reconnect(); !errors.Is(err, injected) || !reflect.DeepEqual(read(), before) {
+		t.Fatalf("reconnect before commit changed the exchange: %v", err)
+	}
+	store.beforeCommit = nil
+	store.afterCommit = func() error { return injected }
+	if err := reconnect(); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("expected uncertain reconnect commit: %v", err)
+	}
+	before.Generation++
+	before.State.Disconnected, before.State.ReconnectConfirmation, before.State.ReconnectID = false, nil, id
+	if err := reconnect(); err == nil || !reflect.DeepEqual(read(), before) {
+		t.Fatalf("used confirmation changed the exchange: %v", err)
+	}
 }

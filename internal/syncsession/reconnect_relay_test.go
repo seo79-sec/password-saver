@@ -96,7 +96,7 @@ func TestVerifyReconnectRelayLog(t *testing.T) {
 
 	proof, err := VerifyReconnectRelayLog(ctx, store, confirmed, matching)
 	require(err)
-	if proof != (ReconnectRelayVerification{log: matching, binding: b, generation: before.Generation,
+	if proof != (ReconnectRelayVerification{replicaID: store.Identity(), log: matching, binding: b, generation: before.Generation,
 		cursor: count, confirmation: owner}) {
 		t.Fatal("verification lost the identity or state it checked")
 	}
