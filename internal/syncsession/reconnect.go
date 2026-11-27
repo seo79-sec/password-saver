@@ -64,20 +64,9 @@ func InspectReconnect(ctx context.Context, store reconnectReader, confirmed repl
 
 func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint) (ReconnectInspection, *syncwire.Receiver, error) {
 	state := view.State
-	if state == nil || !state.Disconnected {
-		return ReconnectInspection{}, nil, ErrReconnectRequiresDisconnect
-	}
-	binding := confirmed.Binding
-	if state.Binding != binding || remote.SpaceID != binding.SpaceID || remote.Epoch != binding.Epoch ||
-		remote.MembershipHash != binding.MembershipHash || remote.CheckpointHash != sha256.Sum256(remote.Wire) ||
-		binding.Epoch == math.MaxUint64 {
-		return ReconnectInspection{}, nil, ErrReconnectCheckpoint
-	}
-	confirmed = reconnectReplayContext(confirmed, state)
-	// RestoreCheckpoint expects the successor of the checkpoint's source epoch.
-	receiver, err := syncwire.RestoreCheckpoint(remote.Wire, binding.SpaceID, binding.Epoch+1, confirmed.EpochKey, confirmed.Signers)
+	receiver, err := restoreReconnectCheckpoint(state, confirmed, remote)
 	if err != nil {
-		return ReconnectInspection{}, nil, fmt.Errorf("%w: %w", ErrReconnectCheckpoint, err)
+		return ReconnectInspection{}, nil, err
 	}
 
 	result := ReconnectInspection{Generation: view.Generation, Pending: len(view.Pending), Comparison: ReconnectDeferred}
@@ -89,7 +78,7 @@ func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore
 	if result.Pending != 0 {
 		return result, receiver, nil
 	}
-	local, err := replayRemovalCheckpoint(confirmed, state)
+	local, err := replayRemovalCheckpoint(reconnectReplayContext(confirmed, state), state)
 	if err != nil {
 		return ReconnectInspection{}, nil, err
 	}
@@ -99,6 +88,26 @@ func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore
 		result.Comparison = ReconnectMatch
 	}
 	return result, receiver, nil
+}
+
+func restoreReconnectCheckpoint(state *replicastore.ExchangeState, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint) (*syncwire.Receiver, error) {
+	if state == nil || !state.Disconnected {
+		return nil, ErrReconnectRequiresDisconnect
+	}
+	binding := confirmed.Binding
+	if state.Binding != binding || remote.SpaceID != binding.SpaceID || remote.Epoch != binding.Epoch ||
+		remote.MembershipHash != binding.MembershipHash || remote.CheckpointHash != sha256.Sum256(remote.Wire) ||
+		binding.Epoch == math.MaxUint64 {
+		return nil, ErrReconnectCheckpoint
+	}
+	confirmed = reconnectReplayContext(confirmed, state)
+	// RestoreCheckpoint expects the successor of the checkpoint's source epoch.
+	receiver, err := syncwire.RestoreCheckpoint(remote.Wire, binding.SpaceID, binding.Epoch+1, confirmed.EpochKey, confirmed.Signers)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReconnectCheckpoint, err)
+	}
+
+	return receiver, nil
 }
 
 func reconnectReplayContext(confirmed replicastore.ExchangeContext, state *replicastore.ExchangeState) replicastore.ExchangeContext {
