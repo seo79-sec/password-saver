@@ -10,6 +10,8 @@ import (
 )
 
 var (
+	// ErrSessionPaused means the session is holding its queue until resumed.
+	ErrSessionPaused   = errors.New("exchange session is paused")
 	ErrSessionInactive = errors.New("exchange requires opt-in and full unlock")
 	ErrSessionChanged  = errors.New("exchange session changed during the request")
 	ErrRunInProgress   = errors.New("exchange run already in progress")
@@ -26,6 +28,7 @@ type Session struct {
 	mu         sync.Mutex
 	enabled    bool
 	unlocked   bool
+	paused     bool
 	generation uint64
 	cancel     context.CancelFunc
 	store      ExchangeStore
@@ -48,6 +51,22 @@ func (s *Session) SetAccess(enabled, fullyUnlocked bool) {
 		return
 	}
 	s.enabled, s.unlocked = enabled, fullyUnlocked
+	s.invalidateRun()
+}
+
+// SetPaused holds or releases the in-memory pause. It never starts an exchange.
+func (s *Session) SetPaused(paused bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paused == paused {
+		return
+	}
+	s.paused = paused
+	s.invalidateRun()
+}
+
+// invalidateRun is called with s.mu held.
+func (s *Session) invalidateRun() {
 	s.generation++
 	if s.cancel != nil {
 		s.cancel()
@@ -58,6 +77,10 @@ func (s *Session) SetAccess(enabled, fullyUnlocked bool) {
 // still permits the pull and leaves ErrQuotaExceeded in the returned error.
 func (s *Session) RunOnce(ctx context.Context) error {
 	s.mu.Lock()
+	if s.paused {
+		s.mu.Unlock()
+		return ErrSessionPaused
+	}
 	if !s.enabled || !s.unlocked {
 		s.mu.Unlock()
 		return ErrSessionInactive
