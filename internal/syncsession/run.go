@@ -25,16 +25,17 @@ type Relay interface {
 
 // Session gates explicit exchange on a test replica.
 type Session struct {
-	mu         sync.Mutex
-	enabled    bool
-	unlocked   bool
-	paused     bool
-	generation uint64
-	cancel     context.CancelFunc
-	store      ExchangeStore
-	confirmed  replicastore.ExchangeContext
-	relay      Relay
-	removalID  [32]byte
+	mu           sync.Mutex
+	enabled      bool
+	unlocked     bool
+	paused       bool
+	disconnected bool
+	generation   uint64
+	cancel       context.CancelFunc
+	store        ExchangeStore
+	confirmed    replicastore.ExchangeContext
+	relay        Relay
+	removalID    [32]byte
 }
 
 // NewSession starts a locked session with exchange disabled.
@@ -47,7 +48,7 @@ func NewSession(store ExchangeStore, confirmed replicastore.ExchangeContext, rel
 func (s *Session) SetAccess(enabled, fullyUnlocked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.enabled == enabled && s.unlocked == fullyUnlocked {
+	if s.disconnected || (s.enabled == enabled && s.unlocked == fullyUnlocked) {
 		return
 	}
 	s.enabled, s.unlocked = enabled, fullyUnlocked
@@ -58,11 +59,36 @@ func (s *Session) SetAccess(enabled, fullyUnlocked bool) {
 func (s *Session) SetPaused(paused bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.paused == paused {
+	if s.disconnected || s.paused == paused {
 		return
 	}
 	s.paused = paused
 	s.invalidateRun()
+}
+
+type exchangeDisconnector interface {
+	DisconnectExchange(context.Context, replicastore.ExchangeBinding, int64) error
+}
+
+// Disconnect closes the session and records the disconnection in the replica.
+// The session remains closed on error. Calling Disconnect again retries the write.
+func (s *Session) Disconnect(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.disconnected {
+		s.disconnected = true
+		s.invalidateRun()
+	}
+	s.mu.Unlock()
+
+	store, ok := s.store.(exchangeDisconnector)
+	if !ok {
+		return errors.New("exchange store does not support disconnection")
+	}
+	view, err := s.store.ReadExchange(ctx, s.confirmed)
+	if err != nil {
+		return err
+	}
+	return store.DisconnectExchange(ctx, s.confirmed.Binding, view.Generation)
 }
 
 // invalidateRun is called with s.mu held.
@@ -77,6 +103,10 @@ func (s *Session) invalidateRun() {
 // still permits the pull and leaves ErrQuotaExceeded in the returned error.
 func (s *Session) RunOnce(ctx context.Context) error {
 	s.mu.Lock()
+	if s.disconnected {
+		s.mu.Unlock()
+		return replicastore.ErrExchangeDisconnected
+	}
 	if s.paused {
 		s.mu.Unlock()
 		return ErrSessionPaused
