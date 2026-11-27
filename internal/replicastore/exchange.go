@@ -42,6 +42,7 @@ type ExchangeState struct {
 	Journal              []ExchangeEnvelope
 	SentSequence, Cursor uint64
 	Removal              *RemovalCandidate `json:",omitempty"`
+	ActivatedRemoval     *ActivatedRemoval `json:",omitempty"`
 }
 
 // ExchangeContext supplies the confirmed binding, checkpoint and keys for replay.
@@ -73,6 +74,17 @@ func (e *ExchangeState) validate() (uint64, error) {
 			return 0, err
 		}
 	}
+	if e.ActivatedRemoval != nil {
+		active := e.ActivatedRemoval
+		if err := active.Transition.validate(); err != nil {
+			return 0, err
+		}
+		if e.Removal != nil || active.ID != sha256.Sum256(active.Transition.Checkpoint) ||
+			b.MembershipHash != sha256.Sum256(active.Transition.Membership) || active.SigningPub == [32]byte{} ||
+			active.Previous.MembershipHash != sha256.Sum256(active.PreviousMembership) {
+			return 0, ErrExchange
+		}
+	}
 	commands := make(map[string]bool)
 	for _, entry := range e.Journal {
 		if len(entry.Wire) > maxExchangeWireBytes-size {
@@ -101,6 +113,12 @@ func (e *ExchangeState) validate() (uint64, error) {
 
 func (e *ExchangeState) replay(confirmed ExchangeContext) (syncwire.ReplayResult, error) {
 	b := e.Binding
+	if e.ActivatedRemoval != nil {
+		if e.ActivatedRemoval.EpochKeyHash != sha256.Sum256(confirmed.EpochKey) {
+			return syncwire.ReplayResult{}, ErrExchange
+		}
+		confirmed.Signers = map[[16]byte]ed25519.PublicKey{b.DeviceID: e.ActivatedRemoval.SigningPub[:]}
+	}
 	if b != confirmed.Binding || b.CheckpointHash != sha256.Sum256(confirmed.Checkpoint) ||
 		len(confirmed.EpochKey) != 32 || len(confirmed.Signers[b.DeviceID]) != ed25519.PublicKeySize {
 		return syncwire.ReplayResult{}, ErrExchange

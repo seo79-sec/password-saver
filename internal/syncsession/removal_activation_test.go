@@ -145,6 +145,59 @@ func TestPrepareRemovalActivation(t *testing.T) {
 			if !reflect.DeepEqual(after, before) {
 				t.Fatal("preparation changed the staged transition or frozen replica")
 			}
+
+			if test.wantErr == nil {
+				run := func(confirmed replicastore.ExchangeContext) {
+					session := NewSession(store, confirmed, nil)
+					session.SetAccess(true, true)
+					if err := session.RunOnce(ctx); !errors.Is(err, ErrRemovalRelayPaused) {
+						t.Fatalf("relay exchange was not paused: %v", err)
+					}
+				}
+				run(confirmed)
+				next, err := ActivateRemoval(ctx, store, confirmed, previous, fingerprint, owner)
+				require(t, err)
+				clear(next.Checkpoint)
+				clear(next.EpochKey)
+				require(t, store.Close())
+				store, err = replicastore.Open(ctx, path, storeKey)
+				require(t, err)
+				active, err := store.ReadActivatedRemoval(ctx)
+				require(t, err)
+				if active == nil || active.ID != sha256.Sum256(candidate.Checkpoint) {
+					t.Fatal("committed transition identifier was not recovered")
+				}
+				previousOnly := replicastore.ExchangeContext{Binding: active.Previous}
+				next, err = ActivateRemoval(ctx, store, previousOnly, active.PreviousMembership, fingerprint, owner)
+				require(t, err)
+				defer clear(next.Checkpoint)
+				defer clear(next.EpochKey)
+				restored, err := store.ReadExchange(ctx, next)
+				require(t, err)
+				if !reflect.DeepEqual(restored.Snapshot, before.Snapshot) {
+					t.Fatal("activated epoch lost the edit/deletion conflict")
+				}
+				wire, err := QueueLocal(ctx, store, next, ownerSigner, "new epoch",
+					syncwire.LocalOperation{RecordID: [16]byte{2}, Action: syncmerge.Put, Data: []byte("new")})
+				require(t, err)
+				envelope, err := syncwire.Parse(wire)
+				require(t, err)
+				if envelope.Header.Seq != 1 || envelope.Header.Epoch != h.Epoch+1 {
+					t.Fatal("first local envelope did not start the new epoch at sequence 1")
+				}
+				run(next)
+				withEdit, err := store.ReadExchange(ctx, next)
+				require(t, err)
+				retried, err := ActivateRemoval(ctx, store, previousOnly, active.PreviousMembership, fingerprint, owner)
+				require(t, err)
+				defer clear(retried.Checkpoint)
+				defer clear(retried.EpochKey)
+				afterRetry, err := store.ReadExchange(ctx, retried)
+				require(t, err)
+				if !reflect.DeepEqual(afterRetry, withEdit) {
+					t.Fatal("activation retry reset the new epoch's local edits")
+				}
+			}
 		})
 	}
 }

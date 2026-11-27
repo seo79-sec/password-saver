@@ -71,6 +71,7 @@ type RemovalActivation struct {
 	Membership []byte
 	Checkpoint []byte
 	EpochKey   [32]byte
+	Transition RemovalCandidate
 }
 
 // PrepareRemovalActivation verifies the staged transition against the frozen
@@ -105,7 +106,7 @@ func PrepareRemovalActivation(ctx context.Context, store ExchangeStore, confirme
 		clear(checkpoint)
 		return RemovalActivation{}, ErrRemovalCheckpointMismatch
 	}
-	return RemovalActivation{Generation: view.Generation, Membership: staged.Membership, Checkpoint: checkpoint, EpochKey: epochKey}, nil
+	return RemovalActivation{Generation: view.Generation, Membership: staged.Membership, Checkpoint: checkpoint, EpochKey: epochKey, Transition: *staged}, nil
 }
 
 func replayRemovalCheckpoint(confirmed replicastore.ExchangeContext, state *replicastore.ExchangeState) ([]byte, error) {
@@ -144,3 +145,61 @@ func readRemovalExchange(ctx context.Context, store ExchangeStore, confirmed rep
 	}
 	return confirmed, view, nil
 }
+
+// ActivateRemoval verifies the frozen journal and installs the new local epoch.
+// After commit, the same call can reopen the committed transition using only
+// confirmed.Binding from the old context. The caller must clear the returned
+// Checkpoint and EpochKey when done.
+func ActivateRemoval(ctx context.Context, store *replicastore.Store, confirmed replicastore.ExchangeContext, previous []byte, fingerprint [32]byte, keys *syncpair.SpaceKeys) (replicastore.ExchangeContext, error) {
+	active, err := store.ReadActivatedRemoval(ctx)
+	if err != nil {
+		return replicastore.ExchangeContext{}, err
+	}
+	var prepared RemovalActivation
+	if active == nil {
+		prepared, err = PrepareRemovalActivation(ctx, store, confirmed, previous, fingerprint, keys)
+	} else {
+		if active.Previous != confirmed.Binding {
+			return replicastore.ExchangeContext{}, replicastore.ErrExchange
+		}
+		staged := active.Transition
+		prepared.Generation, prepared.Transition = staged.Generation+1, staged
+		prepared.EpochKey, err = keys.OpenRemovalKeyPackage(staged.KeyPackage, previous, staged.Membership, fingerprint, staged.Checkpoint)
+		if err == nil {
+			prepared.Checkpoint, err = syncpair.OpenRemovalCheckpointBytes(staged.Checkpoint, previous, staged.Membership, fingerprint, prepared.EpochKey)
+		}
+	}
+	defer clear(prepared.EpochKey[:])
+	if err != nil {
+		return replicastore.ExchangeContext{}, err
+	}
+	next, err := commitRemovalActivation(ctx, store, confirmed.Binding, previous, fingerprint, &prepared)
+	if err != nil {
+		clear(prepared.Checkpoint)
+	}
+	return next, err
+}
+
+func commitRemovalActivation(ctx context.Context, store *replicastore.Store, prior replicastore.ExchangeBinding, previous []byte, fingerprint [32]byte, prepared *RemovalActivation) (replicastore.ExchangeContext, error) {
+	staged := prepared.Transition
+	membership, err := syncpair.VerifyRemoval(staged.Membership, previous, fingerprint)
+	if err != nil {
+		return replicastore.ExchangeContext{}, err
+	}
+	h := membership.Header
+	binding := prior
+	binding.Epoch = h.Epoch
+	binding.MembershipHash = sha256.Sum256(staged.Membership)
+	binding.CheckpointHash = sha256.Sum256(prepared.Checkpoint)
+	writer := h.Members[0].SigningPub
+	next := replicastore.ExchangeContext{Binding: binding, Checkpoint: prepared.Checkpoint, EpochKey: prepared.EpochKey[:],
+		Signers: map[[16]byte]ed25519.PublicKey{h.OwnerID: writer[:]}}
+	if err := store.ActivateRemoval(ctx, prior, previous, fingerprint, prepared.Generation, staged, next); err != nil {
+		return replicastore.ExchangeContext{}, err
+	}
+	next.EpochKey = bytes.Clone(next.EpochKey)
+	return next, nil
+}
+
+// ErrRemovalRelayPaused means the relay has not been connected to the removal epoch.
+var ErrRemovalRelayPaused = errors.New("relay exchange paused for a removal transition")
