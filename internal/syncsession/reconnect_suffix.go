@@ -18,11 +18,12 @@ type ReconnectReconciliation struct {
 
 type reconnectSuffixStore interface {
 	reconnectReader
-	ApplyReconnectSuffix(context.Context, replicastore.ExchangeContext, int64, uint64, uint64, [][]byte) error
+	ApplyReconnectSuffix(context.Context, replicastore.ExchangeContext, int64, uint64, uint64, uint64, [][]byte) error
 }
 
 // ReconcileReconnect catches up a disconnected replica using a local log that
-// the caller has associated with confirmed.Binding.
+// the caller has associated with confirmed.Binding. It acknowledges queued
+// local envelopes only if each exact envelope is present by the reviewed cursor.
 func ReconcileReconnect(ctx context.Context, store reconnectSuffixStore, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint, log *syncrelay.Log, owner ReconnectReconciliation) error {
 	if owner.Generation < 1 || owner.CheckpointHash == [32]byte{} || owner.CheckpointHash != remote.CheckpointHash {
 		return replicastore.ErrReconnectConfirmation
@@ -42,34 +43,42 @@ func ReconcileReconnect(ctx context.Context, store reconnectSuffixStore, confirm
 	if state.Removal != nil {
 		return ErrRemovalRelayPaused
 	}
-	if inspection.Pending != 0 || inspection.Unsent != 0 {
+	if inspection.Pending != 0 {
 		return ErrReconnectNotReady
 	}
-	// Only a committed catch-up advances a disconnected replica's cursor while
-	// leaving its confirmation empty. Recognize an exact retry after a lost reply.
+	// Recognize an exact retry after the catch-up commit response was lost.
 	applied := view.Generation-1 == owner.Generation && owner.Cursor == state.Cursor &&
-		state.ReconnectConfirmation == nil && inspection.Comparison == ReconnectMatch
+		state.ReconnectConfirmation == nil && inspection.Unsent == 0 && inspection.Comparison == ReconnectMatch
 	if view.Generation != owner.Generation && !applied {
 		return replicastore.ErrGeneration
 	}
-	if !applied && (inspection.Comparison != ReconnectMismatch || owner.Cursor <= state.Cursor) {
+	advancesCheckpoint := inspection.Comparison == ReconnectMismatch && owner.Cursor > state.Cursor
+	if !applied && (owner.Cursor < state.Cursor || (!advancesCheckpoint && inspection.Unsent == 0)) {
 		return ErrReconnectNotReady
 	}
 	seen := make(map[string]struct{}, len(state.Journal))
+	unseenLocal := make(map[string]struct{}, inspection.Unsent)
 	journalBytes := 0
 	for _, saved := range state.Journal {
-		seen[string(saved.Wire)] = struct{}{}
+		key := string(saved.Wire)
+		seen[key] = struct{}{}
+		if saved.Sequence > state.SentSequence {
+			unseenLocal[key] = struct{}{}
+		}
 		journalBytes += len(saved.Wire)
 	}
-	if err := verifyReconnectRelayPrefix(ctx, log.List, state.Cursor, seen); err != nil {
+	if err := verifyReconnectRelayPrefix(ctx, log.List, state.Cursor, seen, unseenLocal); err != nil {
 		return err
 	}
 	if applied {
 		return nil
 	}
-	wires, err := readReconnectSuffix(ctx, log, state.Cursor, owner.Cursor, seen, len(state.Journal), journalBytes)
+	wires, err := readReconnectSuffix(ctx, log, state.Cursor, owner.Cursor, seen, unseenLocal, len(state.Journal), journalBytes)
 	if err != nil {
 		return err
+	}
+	if len(unseenLocal) != 0 {
+		return ErrReconnectNotReady
 	}
 	draft := *state
 	draft.Journal = slices.Clone(state.Journal)
@@ -84,10 +93,11 @@ func ReconcileReconnect(ctx context.Context, store reconnectSuffixStore, confirm
 	if !bytes.Equal(candidate, remote.Wire) {
 		return ErrReconnectCheckpoint
 	}
-	return store.ApplyReconnectSuffix(ctx, confirmed, owner.Generation, state.Cursor, owner.Cursor, wires)
+	sent := state.SentSequence + uint64(inspection.Unsent)
+	return store.ApplyReconnectSuffix(ctx, confirmed, owner.Generation, state.Cursor, owner.Cursor, sent, wires)
 }
 
-func readReconnectSuffix(ctx context.Context, log *syncrelay.Log, after, through uint64, seen map[string]struct{}, journalCount, journalBytes int) ([][]byte, error) {
+func readReconnectSuffix(ctx context.Context, log *syncrelay.Log, after, through uint64, seen, unseenLocal map[string]struct{}, journalCount, journalBytes int) ([][]byte, error) {
 	var wires [][]byte
 	for after < through {
 		page, err := readReconnectRelayPage(ctx, log.List, after, through)
@@ -100,6 +110,7 @@ func readReconnectSuffix(ctx context.Context, log *syncrelay.Log, after, through
 			}
 			key := string(entry.Wire)
 			if _, known := seen[key]; known {
+				delete(unseenLocal, key)
 				continue
 			}
 			if journalCount == replicastore.MaxExchangeEnvelopes || len(entry.Wire) > replicastore.MaxExchangeWireBytes-journalBytes {

@@ -58,7 +58,7 @@ func VerifyReconnectRelayLog(ctx context.Context, store reconnectReader, confirm
 	if log == nil {
 		return ReconnectRelayVerification{}, ErrReconnectRelayLog
 	}
-	if err := verifyReconnectRelayPrefix(ctx, log.List, state.Cursor, seen); err != nil {
+	if err := verifyReconnectRelayPrefix(ctx, log.List, state.Cursor, seen, nil); err != nil {
 		return ReconnectRelayVerification{}, err
 	}
 	var replicaID [16]byte
@@ -69,16 +69,18 @@ func VerifyReconnectRelayLog(ctx context.Context, store reconnectReader, confirm
 		cursor: state.Cursor, confirmation: *saved}, nil
 }
 
-func verifyReconnectRelayPrefix(ctx context.Context, list func(uint64, int) ([]syncrelay.Entry, error), cursor uint64, seen map[string]struct{}) error {
+func verifyReconnectRelayPrefix(ctx context.Context, list func(uint64, int) ([]syncrelay.Entry, error), cursor uint64, seen, unseenLocal map[string]struct{}) error {
 	for after := uint64(0); after < cursor; {
 		page, err := readReconnectRelayPage(ctx, list, after, cursor)
 		if err != nil {
 			return err
 		}
 		for _, entry := range page {
-			if _, known := seen[string(entry.Wire)]; !known {
+			key := string(entry.Wire)
+			if _, known := seen[key]; !known {
 				return fmt.Errorf("%w: unexpected envelope at position %d", ErrReconnectRelayLog, entry.Cursor)
 			}
+			delete(unseenLocal, key)
 			after = entry.Cursor
 		}
 	}
