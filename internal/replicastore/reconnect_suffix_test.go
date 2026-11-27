@@ -12,6 +12,15 @@ import (
 )
 
 func TestApplyReconnectSuffixCommitBoundary(t *testing.T) {
+	testReconnectApplyCommitBoundary(t, false)
+}
+
+func TestApplyReconnectMergeCommitBoundary(t *testing.T) {
+	testReconnectApplyCommitBoundary(t, true)
+}
+
+func testReconnectApplyCommitBoundary(t *testing.T, merge bool) {
+	t.Helper()
 	ctx := t.Context()
 	store, path := newStore(t)
 	check := func(err error) {
@@ -52,7 +61,18 @@ func TestApplyReconnectSuffixCommitBoundary(t *testing.T) {
 		RecordID: [16]byte{4}, Action: syncmerge.Put, Data: []byte("peer operation"),
 	}, key, peerSigner)
 	check(err)
+	receipt := ReconnectMergeReceipt{
+		Generation: before.Generation, Cursor: 1,
+		CheckpointHash: sha256.Sum256([]byte("peer checkpoint")),
+		MergeHash:      sha256.Sum256([]byte("merged checkpoint")),
+		RelayHash:      sha256.Sum256(wire),
+	}
 	apply := func(generation int64) error {
+		if merge {
+			approval := receipt
+			approval.Generation = generation
+			return store.ApplyReconnectMerge(ctx, confirmed, approval, 0, 0, [][]byte{wire})
+		}
 		return store.ApplyReconnectSuffix(ctx, confirmed, generation, 0, 1, 0, [][]byte{wire})
 	}
 	if err := apply(before.Generation - 1); !errors.Is(err, ErrGeneration) {
@@ -74,5 +94,19 @@ func TestApplyReconnectSuffixCommitBoundary(t *testing.T) {
 	if after.Generation != before.Generation+1 || !after.State.Disconnected || after.State.ReconnectConfirmation != nil ||
 		after.State.Cursor != 1 || len(after.State.Journal) != 1 || after.State.SentSequence != 0 || len(after.Snapshot) != 1 {
 		t.Fatal("catch-up was not persisted atomically")
+	}
+	if merge {
+		if after.State.ReconnectMergeReceipt == nil || *after.State.ReconnectMergeReceipt != receipt {
+			t.Fatal("merge receipt was not persisted")
+		}
+		check(apply(before.Generation))
+		if !reflect.DeepEqual(readExchange(), after) {
+			t.Fatal("exact retry wrote the merge twice")
+		}
+		receipt.MergeHash[0] ^= 1
+		err := store.ApplyReconnectMerge(ctx, confirmed, receipt, 1, 0, nil)
+		if !errors.Is(err, ErrGeneration) || !reflect.DeepEqual(readExchange(), after) {
+			t.Fatalf("different receipt was accepted as an exact retry: %v", err)
+		}
 	}
 }

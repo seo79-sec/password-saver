@@ -57,6 +57,7 @@ type ExchangeState struct {
 	ActivatedRemoval      *ActivatedRemoval      `json:",omitempty"`
 	Disconnected          bool                   `json:",omitempty"`
 	ReconnectConfirmation *ReconnectConfirmation `json:",omitempty"`
+	ReconnectMergeReceipt *ReconnectMergeReceipt `json:",omitempty"`
 	ReconnectID           [16]byte               `json:",omitzero"`
 }
 
