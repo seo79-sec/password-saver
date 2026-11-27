@@ -16,6 +16,8 @@ import (
 var (
 	// ErrReconnectRequiresDisconnect indicates that the replica must be disconnected first.
 	ErrReconnectRequiresDisconnect = errors.New("reconnect inspection requires a disconnected replica")
+	// ErrReconnectNotReady indicates a mismatch or outstanding changes.
+	ErrReconnectNotReady = errors.New("reconnect requires a matching checkpoint and no outstanding changes")
 	// ErrReconnectCheckpoint indicates an invalid checkpoint or mismatched binding.
 	ErrReconnectCheckpoint = errors.New("invalid reconnect checkpoint")
 )
@@ -56,6 +58,10 @@ func InspectReconnect(ctx context.Context, store reconnectReader, confirmed repl
 	if err != nil {
 		return ReconnectInspection{}, err
 	}
+	return inspectReconnectView(view, confirmed, remote)
+}
+
+func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint) (ReconnectInspection, error) {
 	state := view.State
 	if state == nil || !state.Disconnected {
 		return ReconnectInspection{}, ErrReconnectRequiresDisconnect
@@ -93,4 +99,34 @@ func InspectReconnect(ctx context.Context, store reconnectReader, confirmed repl
 		result.Comparison = ReconnectMatch
 	}
 	return result, nil
+}
+
+type reconnectConfirmer interface {
+	reconnectReader
+	ConfirmReconnect(context.Context, replicastore.ExchangeBinding, replicastore.ReconnectConfirmation) error
+}
+
+// ConfirmReconnect repeats the inspection and saves the owner's decision without enabling exchange.
+func ConfirmReconnect(ctx context.Context, store reconnectConfirmer, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint, owner replicastore.ReconnectConfirmation) error {
+	view, err := store.ReadExchange(ctx, confirmed)
+	if err != nil {
+		return err
+	}
+	inspection, err := inspectReconnectView(view, confirmed, remote)
+	if err != nil {
+		return err
+	}
+	if owner.CheckpointHash != remote.CheckpointHash {
+		return replicastore.ErrReconnectConfirmation
+	}
+	if inspection.Comparison != ReconnectMatch || inspection.Unsent != 0 || inspection.Pending != 0 {
+		return ErrReconnectNotReady
+	}
+	if owner.Generation != inspection.Generation {
+		saved := view.State.ReconnectConfirmation
+		if saved == nil || *saved != owner || owner.Generation != inspection.Generation-1 {
+			return replicastore.ErrGeneration
+		}
+	}
+	return store.ConfirmReconnect(ctx, confirmed.Binding, owner)
 }
