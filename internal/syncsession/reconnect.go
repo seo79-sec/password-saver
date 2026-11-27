@@ -58,26 +58,28 @@ func InspectReconnect(ctx context.Context, store reconnectReader, confirmed repl
 	if err != nil {
 		return ReconnectInspection{}, err
 	}
-	return inspectReconnectView(view, confirmed, remote)
+	inspection, _, err := inspectReconnectView(view, confirmed, remote)
+	return inspection, err
 }
 
-func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint) (ReconnectInspection, error) {
+func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore.ExchangeContext, remote ReconnectCheckpoint) (ReconnectInspection, *syncwire.Receiver, error) {
 	state := view.State
 	if state == nil || !state.Disconnected {
-		return ReconnectInspection{}, ErrReconnectRequiresDisconnect
+		return ReconnectInspection{}, nil, ErrReconnectRequiresDisconnect
 	}
 	binding := confirmed.Binding
 	if state.Binding != binding || remote.SpaceID != binding.SpaceID || remote.Epoch != binding.Epoch ||
 		remote.MembershipHash != binding.MembershipHash || remote.CheckpointHash != sha256.Sum256(remote.Wire) ||
 		binding.Epoch == math.MaxUint64 {
-		return ReconnectInspection{}, ErrReconnectCheckpoint
+		return ReconnectInspection{}, nil, ErrReconnectCheckpoint
 	}
 	if active := state.ActivatedRemoval; active != nil {
 		confirmed.Signers = map[[16]byte]ed25519.PublicKey{binding.DeviceID: active.SigningPub[:]}
 	}
 	// RestoreCheckpoint expects the successor of the checkpoint's source epoch.
-	if _, err := syncwire.RestoreCheckpoint(remote.Wire, binding.SpaceID, binding.Epoch+1, confirmed.EpochKey, confirmed.Signers); err != nil {
-		return ReconnectInspection{}, fmt.Errorf("%w: %w", ErrReconnectCheckpoint, err)
+	receiver, err := syncwire.RestoreCheckpoint(remote.Wire, binding.SpaceID, binding.Epoch+1, confirmed.EpochKey, confirmed.Signers)
+	if err != nil {
+		return ReconnectInspection{}, nil, fmt.Errorf("%w: %w", ErrReconnectCheckpoint, err)
 	}
 
 	result := ReconnectInspection{Generation: view.Generation, Pending: len(view.Pending), Comparison: ReconnectDeferred}
@@ -87,18 +89,18 @@ func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore
 		}
 	}
 	if result.Pending != 0 {
-		return result, nil
+		return result, receiver, nil
 	}
 	local, err := replayRemovalCheckpoint(confirmed, state)
 	if err != nil {
-		return ReconnectInspection{}, err
+		return ReconnectInspection{}, nil, err
 	}
 	defer clear(local)
 	result.Comparison = ReconnectMismatch
 	if bytes.Equal(local, remote.Wire) {
 		result.Comparison = ReconnectMatch
 	}
-	return result, nil
+	return result, receiver, nil
 }
 
 type reconnectConfirmer interface {
@@ -112,7 +114,7 @@ func ConfirmReconnect(ctx context.Context, store reconnectConfirmer, confirmed r
 	if err != nil {
 		return err
 	}
-	inspection, err := inspectReconnectView(view, confirmed, remote)
+	inspection, _, err := inspectReconnectView(view, confirmed, remote)
 	if err != nil {
 		return err
 	}
