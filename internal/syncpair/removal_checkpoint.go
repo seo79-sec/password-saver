@@ -84,42 +84,58 @@ func (keys *SpaceKeys) SealRemovalCheckpoint(previous, current []byte, confirmed
 // OpenRemovalCheckpoint authenticates the envelope against the signed removal
 // and restores a fresh receiver whose writers come from the new membership.
 func OpenRemovalCheckpoint(wire, previous, current []byte, confirmed, epochKey [32]byte) (*syncwire.Receiver, error) {
+	receiver, checkpoint, err := openRemovalCheckpoint(wire, previous, current, confirmed, epochKey)
+	clear(checkpoint)
+	return receiver, err
+}
+
+// OpenRemovalCheckpointBytes returns the original canonical checkpoint after
+// authentication and validation by RestoreCheckpoint. The caller must clear it when done.
+func OpenRemovalCheckpointBytes(wire, previous, current []byte, confirmed, epochKey [32]byte) ([]byte, error) {
+	_, checkpoint, err := openRemovalCheckpoint(wire, previous, current, confirmed, epochKey)
+	return checkpoint, err
+}
+
+func openRemovalCheckpoint(wire, previous, current []byte, confirmed, epochKey [32]byte) (*syncwire.Receiver, []byte, error) {
 	if len(wire) > removalCheckpointMaxEnvelopeSize {
-		return nil, errors.New("removal checkpoint envelope exceeds size limit")
+		return nil, nil, errors.New("removal checkpoint envelope exceeds size limit")
 	}
 	var envelope signedRemovalCheckpoint
 	if err := decodeCanonicalPairing(wire, &envelope); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	membership, err := VerifyRemoval(current, previous, confirmed)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	h := membership.Header
 	if envelope.Header != removalCheckpointBinding(h, current) ||
 		len(envelope.Ciphertext) <= removalCheckpointEncryptionOverhead ||
 		len(envelope.Ciphertext) > maxCheckpointSize+removalCheckpointEncryptionOverhead {
-		return nil, errors.New("invalid removal checkpoint header or ciphertext size")
+		return nil, nil, errors.New("invalid removal checkpoint header or ciphertext size")
 	}
 	aad, err := encMode.Marshal(envelope.Header)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ed25519.Verify(h.ControllerPub[:], removalCheckpointSignatureInput(aad, envelope.Ciphertext), envelope.Signature[:]) {
-		return nil, errors.New("invalid removal checkpoint signature")
+		return nil, nil, errors.New("invalid removal checkpoint signature")
 	}
 	gcm, err := removalCheckpointAEAD(epochKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	checkpoint, err := gcm.Open(nil, nil, envelope.Ciphertext, aad)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt removal checkpoint: %w", err)
+		return nil, nil, fmt.Errorf("decrypt removal checkpoint: %w", err)
 	}
-	defer clear(checkpoint)
-	return restoreRemovalCheckpoint(checkpoint, h, epochKey)
+	receiver, err := restoreRemovalCheckpoint(checkpoint, h, epochKey)
+	if err != nil {
+		clear(checkpoint)
+		return nil, nil, err
+	}
+	return receiver, checkpoint, nil
 }
-
 func removalCheckpointBinding(h MembershipHeader, current []byte) removalCheckpointHeader {
 	return removalCheckpointHeader{Version: removalCheckpointVersion, SpaceID: h.SpaceID,
 		Revision: h.Revision, Epoch: h.Epoch, MembershipHash: sha256.Sum256(current)}
