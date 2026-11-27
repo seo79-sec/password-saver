@@ -73,9 +73,7 @@ func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore
 		binding.Epoch == math.MaxUint64 {
 		return ReconnectInspection{}, nil, ErrReconnectCheckpoint
 	}
-	if active := state.ActivatedRemoval; active != nil {
-		confirmed.Signers = map[[16]byte]ed25519.PublicKey{binding.DeviceID: active.SigningPub[:]}
-	}
+	confirmed = reconnectReplayContext(confirmed, state)
 	// RestoreCheckpoint expects the successor of the checkpoint's source epoch.
 	receiver, err := syncwire.RestoreCheckpoint(remote.Wire, binding.SpaceID, binding.Epoch+1, confirmed.EpochKey, confirmed.Signers)
 	if err != nil {
@@ -101,6 +99,13 @@ func inspectReconnectView(view replicastore.ExchangeView, confirmed replicastore
 		result.Comparison = ReconnectMatch
 	}
 	return result, receiver, nil
+}
+
+func reconnectReplayContext(confirmed replicastore.ExchangeContext, state *replicastore.ExchangeState) replicastore.ExchangeContext {
+	if active := state.ActivatedRemoval; active != nil {
+		confirmed.Signers = map[[16]byte]ed25519.PublicKey{confirmed.Binding.DeviceID: active.SigningPub[:]}
+	}
+	return confirmed
 }
 
 type reconnectConfirmer interface {
