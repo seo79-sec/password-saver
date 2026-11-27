@@ -19,12 +19,7 @@ var (
 )
 
 // RemovalCandidate contains the artifacts and the generation for an atomic transition.
-type RemovalCandidate struct {
-	Generation int64
-	Membership []byte
-	Checkpoint []byte
-	KeyPackage []byte
-}
+type RemovalCandidate = replicastore.RemovalCandidate
 
 // PrepareRemoval builds a candidate from one confirmed SQLite generation.
 func PrepareRemoval(ctx context.Context, store ExchangeStore, confirmed replicastore.ExchangeContext, previous []byte, fingerprint [32]byte, keys *syncpair.SpaceKeys, removed [16]byte) (RemovalCandidate, error) {
