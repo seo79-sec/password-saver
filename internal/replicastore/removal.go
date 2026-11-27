@@ -55,6 +55,9 @@ func (s *Store) StageRemoval(ctx context.Context, binding ExchangeBinding, previ
 	if identity != s.identity {
 		return ErrAuthentication
 	}
+	if data.Exchange != nil && data.Exchange.Disconnected {
+		return ErrExchangeDisconnected
+	}
 	exchange := data.Exchange
 	if exchange == nil || exchange.Binding != binding || binding.MembershipHash != sha256.Sum256(previous) {
 		return ErrExchange
@@ -143,6 +146,9 @@ func (s *Store) ActivateRemoval(ctx context.Context, previous ExchangeBinding, s
 	}
 	if identity != s.identity {
 		return ErrAuthentication
+	}
+	if data.Exchange != nil && data.Exchange.Disconnected {
+		return ErrExchangeDisconnected
 	}
 	e := data.Exchange
 	if e == nil || previous.MembershipHash != sha256.Sum256(signedPrevious) {
